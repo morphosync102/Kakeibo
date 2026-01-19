@@ -1,13 +1,15 @@
 'use client';
 
-import { useState, useEffect, FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, FormEvent, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
-export default function LoginPage() {
+function LoginContent() {
     const [input, setInput] = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(false);
     const router = useRouter();
+    const searchParams = useSearchParams();
+    const returnTo = searchParams.get('returnTo');
 
     const performLogin = async (password: string) => {
         setIsLoading(true);
@@ -21,7 +23,7 @@ export default function LoginPage() {
             });
 
             if (res.ok) {
-                router.push('/');
+                router.push(returnTo || '/');
                 router.refresh();
             } else {
                 setError(true);
@@ -99,5 +101,13 @@ export default function LoginPage() {
                 </form>
             </div>
         </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense fallback={<div>Loading...</div>}>
+            <LoginContent />
+        </Suspense>
     );
 }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 // This URL will be updated with the user's new deployment URL
-const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbzDGfsMyS12zFIjE2htjJkjV2tiPEFgjxvurWzfOO2ZbWG5-Un_TDNcYiqJDaOJkxw9/exec';
+const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbwW7JiWn9ju619ndQTcmWhS7kRT9UNK2yNz6nmNm40X-Jgmsr-UrdVsunRpHtOW4zan/exec';
 
 export async function GET(request: Request) {
     try {

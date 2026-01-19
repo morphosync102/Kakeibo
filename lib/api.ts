@@ -10,9 +10,10 @@ export interface Expense {
 // Call our own Next.js API route (proxy) instead of GAS directly
 const API_URL = '/api/expenses';
 
-export async function fetchExpenses(): Promise<Expense[]> {
+export async function fetchExpenses(source?: string): Promise<Expense[]> {
   try {
-    const res = await fetch(API_URL);
+    const url = source ? `${API_URL}?source=${source}` : API_URL;
+    const res = await fetch(url);
     if (!res.ok) {
       throw new Error('Failed to fetch data');
     }

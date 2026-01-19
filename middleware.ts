@@ -6,7 +6,7 @@ export function middleware(request: NextRequest) {
     const sessionCallback = request.cookies.get('kakeibo_session');
 
     // Protected Routes
-    const protectedPaths = ['/', '/calendar', '/manage', '/api/expenses'];
+    const protectedPaths = ['/', '/calendar', '/manage', '/api/expenses', '/yahoo'];
 
     // Check if current path matches any protected path
     const isProtected = protectedPaths.some(path =>
@@ -19,7 +19,9 @@ export function middleware(request: NextRequest) {
         if (request.nextUrl.pathname.startsWith('/api/')) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
-        return NextResponse.redirect(new URL('/login', request.url));
+        const loginUrl = new URL('/login', request.url);
+        loginUrl.searchParams.set('returnTo', request.nextUrl.pathname);
+        return NextResponse.redirect(loginUrl);
     }
 
     return NextResponse.next();

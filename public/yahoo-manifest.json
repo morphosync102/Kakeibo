@@ -1,0 +1,21 @@
+{
+    "name": "Yahoo Card Kakeibo",
+    "short_name": "Yahoo Kakeibo",
+    "description": "Yahoo Card Expenses",
+    "start_url": "/yahoo",
+    "display": "standalone",
+    "background_color": "#1e293b",
+    "theme_color": "#1e293b",
+    "icons": [
+        {
+            "src": "/psyduck.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "/psyduck.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ]
+}
