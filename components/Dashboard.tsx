@@ -131,7 +131,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
             {/* Header */}
             <header className={clsx("px-6 py-4 sticky top-0 z-10 flex justify-between items-center shadow-sm safe-area-top transition-colors", headerBg)}>
                 <h1 className={clsx("text-xl font-bold", textColor)}>
-                    {source === 'yahoo' ? 'Yahoo Card' : 'My Kakeibo'}
+                    {source === 'yahoo' ? '個人kakeibo' : 'My Kakeibo'}
                 </h1>
                 <button
                     onClick={refresh}

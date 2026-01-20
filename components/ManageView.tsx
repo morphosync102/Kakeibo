@@ -76,7 +76,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
             {/* Header */}
             <header className={clsx("px-6 py-4 sticky top-0 z-10 shadow-sm safe-area-top flex justify-between items-center", headerBg)}>
                 <h1 className={clsx("text-xl font-bold", textColor)}>
-                    {isYahoo ? 'Yahoo Card 管理' : '管理・入力'}
+                    {isYahoo ? '個人kakeibo管理' : '管理・入力'}
                 </h1>
             </header>
 

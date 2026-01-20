@@ -1,0 +1,421 @@
+/**
+ * Kakeibo Automation - Universal Ver 2.1 (Multi-Source Support)
+ * Supports: Main & Yahoo (Olive) Sheets
+ */
+
+const SHEET_ID = '1cBUYB1Ir-RRKtX9FsZgbRLPuAW5NyFSubJmrbhECoUQ';
+
+// Default Sheets
+const DATA_SHEET_NAME = 'Data';
+const CONFIG_SHEET_NAME = 'Config';
+const FIXED_SHEET_NAME = 'Fixed';
+
+// Yahoo (Olive) Sheets
+const YAHOO_DATA_SHEET_NAME = 'Yahoo_Data';
+const YAHOO_CONFIG_SHEET_NAME = 'Yahoo_Config';
+const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
+
+// --- Helper: Get Target Sheet Names based on source ---
+function getTargetSheets(source) {
+  if (source === 'yahoo') {
+    return {
+      data: YAHOO_DATA_SHEET_NAME,
+      config: YAHOO_CONFIG_SHEET_NAME,
+      fixed: YAHOO_FIXED_SHEET_NAME
+    };
+  }
+  return {
+    data: DATA_SHEET_NAME,
+    config: CONFIG_SHEET_NAME,
+    fixed: FIXED_SHEET_NAME
+  };
+}
+
+// --- API: Read Data ---
+function doGet(e) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const action = e.parameter.action;
+  const source = e.parameter.source; // 'yahoo' or undefined
+  const sheets = getTargetSheets(source);
+  
+  if (action === 'getFixedCosts') {
+    const sheet = ss.getSheetByName(sheets.fixed);
+    if (!sheet) return responseJSON([]);
+    const data = sheet.getDataRange().getValues();
+    if (data.length > 0) data.shift(); // Remove header
+    const fixedCosts = data.map((row, index) => ({
+      id: index, 
+      type: row[0],
+      name: row[1],
+      amount: row[2],
+      day: row[3],
+      category: row[4]
+    }));
+    return responseJSON(fixedCosts);
+  }
+
+  // Default: Get Expenses
+  const sheet = ss.getSheetByName(sheets.data);
+  if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length > 0) data.shift(); // Remove header
+  
+  const formattedMsg = data.map(row => {
+    let dateStr = row[0];
+    if (dateStr instanceof Date) {
+        dateStr = Utilities.formatDate(dateStr, Session.getScriptTimeZone(), "yyyy/MM/dd");
+    }
+    
+    return {
+      id: row[4], // MessageId
+      date: dateStr,
+      merchant: row[1],
+      amount: row[2],
+      category: row[3],
+      type: row[6] || 'Expense' // Column G (Index 6)
+    };
+  });
+  
+  return responseJSON(formattedMsg);
+}
+
+// --- API: Write Data ---
+function doPost(e) {
+  try {
+    const params = JSON.parse(e.postData.contents);
+    const action = params.action;
+    const source = params.source; // 'yahoo' or undefined
+    const sheets = getTargetSheets(source);
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+
+    if (action === 'addTransaction') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      
+      sheet.appendRow([
+        params.date,
+        params.merchant,
+        Number(params.amount),
+        Number(params.amount) > 0 && params.type !== 'Income' ? params.category : (params.category || '未分類'),
+        'manual_' + new Date().getTime(),
+        new Date(),
+        params.type || 'Expense'
+      ]);
+      return responseJSON({success: true, message: 'Added transaction'});
+    }
+    
+    // --- Fixed Cost Actions ---
+    if (action === 'addFixedCost') {
+      const sheet = ss.getSheetByName(sheets.fixed);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+      
+      sheet.appendRow([
+        params.type,
+        params.name,
+        Number(params.amount),
+        Number(params.day),
+        params.category
+      ]);
+      return responseJSON({success: true});
+    }
+
+    if (action === 'deleteFixedCost') {
+       const sheet = ss.getSheetByName(sheets.fixed);
+       if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+       
+       const rowIndex = parseInt(params.id) + 2; 
+       sheet.deleteRow(rowIndex);
+       return responseJSON({success: true});
+    }
+
+    if (action === 'deleteTransaction') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      
+      const data = sheet.getDataRange().getValues();
+      const targetId = params.id;
+      
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][4]) === String(targetId)) {
+          sheet.deleteRow(i + 1);
+          return responseJSON({success: true, message: 'Deleted'});
+        }
+      }
+      return responseJSON({error: 'Transaction not found'});
+    }
+
+    return responseJSON({error: 'Unknown action'});
+
+  } catch (err) {
+    return responseJSON({error: err.toString()});
+  }
+}
+
+function responseJSON(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// --- Automation: Process Fixed Costs (Daily Trigger) ---
+// Note: This needs to run for BOTH sheets now
+function processFixedCosts() {
+  processFixedCostsForSource(); // Default
+  processFixedCostsForSource('yahoo'); // Yahoo
+}
+
+function processFixedCostsForSource(source) {
+  console.log(`--- Checking Fixed Costs for: ${source || 'default'} ---`);
+  const sheets = getTargetSheets(source);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  
+  const fixedSheet = ss.getSheetByName(sheets.fixed);
+  const dataSheet = ss.getSheetByName(sheets.data);
+  
+  if (!fixedSheet || !dataSheet) return;
+
+  const today = new Date();
+  const currentDay = today.getDate();
+  const currentMonthStr = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM");
+
+  const fixedData = fixedSheet.getDataRange().getValues();
+  if (fixedData.length > 0) fixedData.shift();
+
+  const existingIds = getExistingMessageIds(dataSheet);
+  const newRows = [];
+
+  fixedData.forEach(row => {
+    // 0:Type, 1:Name, 2:Amount, 3:Day, 4:Category
+    const scheduledDay = row[3];
+    
+    if (Number(scheduledDay) === currentDay) {
+       const uniqueId = `fixed_${currentMonthStr.replace('/', '')}_${row[1]}_${source || 'main'}`;
+       
+       if (!existingIds.has(uniqueId)) {
+         console.log(`Adding: ${row[1]}`);
+         const dateStr = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM/dd");
+         
+         newRows.push([
+           dateStr,
+           row[1], // Name
+           row[2], // Amount
+           row[4], // Category
+           uniqueId,
+           new Date(),
+           row[0]  // Type
+         ]);
+       }
+    }
+  });
+
+  if (newRows.length > 0) {
+    dataSheet.getRange(dataSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+  }
+}
+
+// --- Email Extraction (Main & Olive) ---
+function runEmailExtraction() {
+  extractRakutenEmails(); // Existing
+  extractOliveEmails();   // New
+}
+
+function extractRakutenEmails() {
+  console.log("--- Starting Rakuten Extraction ---");
+  const sheets = getTargetSheets('main'); // Use Main sheets for Rakuten
+  const categoryMap = getCategoryMap(sheets.config);
+  
+  const query = 'from:info@mail.rakuten-card.co.jp subject:利用のお知らせ -subject:速報版 newer_than:5d';
+  const threads = GmailApp.search(query);
+  
+  if (threads.length === 0) return;
+  
+  const messages = GmailApp.getMessagesForThreads(threads);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheets.data);
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = [];
+  
+  for (const threadMessages of messages) {
+    for (const message of threadMessages) {
+      if (message.getSubject().includes("速報版")) continue;
+      if (existingIds.has(message.getId())) continue;
+      
+      const items = parseEmailBody(message.getPlainBody());
+      for (const item of items) {
+        const category = determineCategory(item.merchant, categoryMap);
+        newRows.push([
+          item.date,
+          item.merchant,
+          item.amount,
+          category,
+          message.getId(),
+          new Date(),
+          'Expense' // Type
+        ]);
+      }
+    }
+  }
+  
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    console.log(`Added ${newRows.length} transactions.`);
+  }
+}
+
+function parseEmailBody(body) {
+  const items = [];
+  // Strategy 1: Tabular
+  const regexTabular = /(\d{4}\/\d{1,2}\/\d{1,2})[\s\t]+(.+?)[\s\t]+([0-9,]+)[\s]*円/g;
+  let match;
+  while ((match = regexTabular.exec(body)) !== null) {
+    if (match[2].trim().length > 0) {
+        items.push({
+        date: match[1],
+        merchant: match[2].trim(),
+        amount: parseInt(match[3].replace(/,/g, ''), 10)
+        });
+    }
+  }
+  // Strategy 2: Vertical
+  const lines = body.split(/\r?\n/);
+  let tempItem = {};
+  for (const line of lines) {
+    if (line.includes('利用日:')) tempItem.date = line.split(':')[1].trim();
+    else if (line.includes('利用先:')) tempItem.merchant = line.split(':')[1].trim();
+    else if (line.includes('利用金額:')) {
+       const val = line.split(':')[1];
+       if (val) {
+         tempItem.amount = parseInt(val.replace('円', '').replace(/,/g, '').trim(), 10);
+         if (tempItem.date && tempItem.merchant && !isNaN(tempItem.amount)) {
+            items.push({...tempItem});
+            tempItem = {};
+         }
+       }
+    }
+  }
+  return items;
+}
+
+
+function extractOliveEmails() {
+  console.log("--- Starting Olive (Vpass) Extraction ---");
+  const sheets = getTargetSheets('yahoo'); // Use Yahoo sheets for Olive
+  const categoryMap = getCategoryMap(sheets.config);
+  
+  // Olive search query (Adjust source domain if needed, e.g. vpass.ne.jp)
+  const query = 'subject:利用のお知らせ newer_than:2d "三井住友カード"'; 
+  const threads = GmailApp.search(query);
+  
+  if (threads.length === 0) return;
+  
+  const messages = GmailApp.getMessagesForThreads(threads);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheets.data);
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = [];
+  
+  for (const threadMessages of messages) {
+    for (const message of threadMessages) {
+      if (existingIds.has(message.getId())) continue;
+      
+      const body = message.getPlainBody();
+      if (!body.includes('ご利用内容')) continue;
+
+      const items = parseOliveBody(body);
+      for (const item of items) {
+        const category = determineCategory(item.merchant, categoryMap);
+        newRows.push([
+          item.date,
+          item.merchant,
+          item.amount,
+          category,
+          message.getId(),
+          new Date(),
+          'Expense'
+        ]);
+        console.log(`Parsed Olive: ${item.merchant} ${item.amount}円`);
+      }
+    }
+  }
+  
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+  }
+}
+
+function parseOliveBody(body) {
+  // Olive format:
+  // ご利用日時：2026/01/16 20:16
+  // MCDONALDS MOBILE ORDER/AP（買物）	130円
+  
+  const items = [];
+  const dateRegex = /ご利用日時：(\d{4}\/\d{1,2}\/\d{1,2})/;
+  const amountRegex = /([0-9,]+)円/;
+  
+  const lines = body.split(/\r?\n/);
+  let date = null;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // Find Date line
+    const dateMatch = line.match(dateRegex);
+    if (dateMatch) {
+      date = dateMatch[1];
+      // The NEXT non-empty line usually contains Merchant and Amount
+      let nextLineIndex = i + 1;
+      while(nextLineIndex < lines.length && lines[nextLineIndex].trim() === "") {
+        nextLineIndex++;
+      }
+      
+      if (nextLineIndex < lines.length) {
+        const detailLine = lines[nextLineIndex].trim();
+        const amountMatch = detailLine.match(amountRegex);
+        
+        if (amountMatch) {
+          const amount = parseInt(amountMatch[1].replace(/,/g, ''), 10);
+          let merchant = detailLine.replace(amountMatch[0], '').trim();
+          
+          items.push({
+            date: date,
+            merchant: merchant,
+            amount: amount
+          });
+        }
+      }
+    }
+  }
+  return items;
+}
+
+// --- Shared Helpers ---
+
+function determineCategory(merchant, categoryMap) {
+  const normMerchant = normalizeText(merchant);
+  for (const map of categoryMap) {
+    if (normMerchant.indexOf(normalizeText(map.keyword)) !== -1) return map.category;
+  }
+  return '未分類';
+}
+
+function normalizeText(text) {
+  if (!text) return "";
+  return text.toString().normalize('NFKC').replace(/[\-－‑‒–—―]/g, 'ー').replace(/\u002d/g, 'ー').toLowerCase();
+}
+
+function getCategoryMap(sheetName) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheetName || CONFIG_SHEET_NAME);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  if (data.length > 0) data.shift(); // Remove header
+  return data.map(row => ({ keyword: row[0], category: row[1] })).filter(r => r.keyword);
+}
+
+function getExistingMessageIds(sheet) {
+  const ids = new Set();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return ids;
+  const data = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
+  data.forEach(row => { if (row[0]) ids.add(row[0]); });
+  return ids;
+}
