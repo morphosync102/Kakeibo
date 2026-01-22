@@ -7,6 +7,8 @@ import { RefreshCw, Calendar as CalendarIcon } from 'lucide-react';
 import { clsx } from 'clsx';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import BottomNav from '@/components/BottomNav';
+import ExpenseDetailModal from './ExpenseDetailModal';
+import { Expense } from '@/lib/api';
 
 // Lovely color palette for finance categories
 const COLORS = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#14b8a6'];
@@ -20,6 +22,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
     const { expenses, loading, refresh } = useExpenses(source);
     const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy/MM'));
     const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+    const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
     const [isScrolledToEnd, setIsScrolledToEnd] = useState(false);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -131,7 +134,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
             {/* Header */}
             <header className={clsx("px-6 py-4 sticky top-0 z-10 flex justify-between items-center shadow-sm safe-area-top transition-colors", headerBg)}>
                 <h1 className={clsx("text-xl font-bold", textColor)}>
-                    {source === 'yahoo' ? '個人kakeibo' : 'My Kakeibo'}
+                    {source === 'yahoo' ? '個人kakeibo' : 'My kakeibo'}
                 </h1>
                 <button
                     onClick={refresh}
@@ -327,8 +330,9 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                         {filteredViewData.map((item, index) => (
                             <div
                                 key={`${item.id}-${index}`}
+                                onClick={() => setSelectedExpense(item)}
                                 className={clsx(
-                                    "p-4 rounded-xl shadow-sm border flex justify-between items-center",
+                                    "p-4 rounded-xl shadow-sm border flex justify-between items-center cursor-pointer transition-transform active:scale-[0.99]",
                                     cardBgColor
                                 )}
                             >
@@ -353,25 +357,6 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                                     )}>
                                         {item.type === 'Income' ? '+' : ''}¥{item.amount.toLocaleString()}
                                     </div>
-                                    <button
-                                        onClick={async (e) => {
-                                            e.stopPropagation();
-                                            if (!confirm('この明細を削除しますか？')) return;
-                                            try {
-                                                await fetch('/api/expenses', {
-                                                    method: 'POST',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ action: 'deleteTransaction', id: item.id, source }) // Pass source here if needed for deletion
-                                                });
-                                                refresh();
-                                            } catch (err) {
-                                                alert('削除に失敗しました');
-                                            }
-                                        }}
-                                        className="text-xs text-red-300 hover:text-red-500 px-2"
-                                    >
-                                        ×
-                                    </button>
                                 </div>
                             </div>
                         ))}
@@ -384,6 +369,14 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                     </div>
                 )}
             </div>
+
+            <ExpenseDetailModal
+                isOpen={!!selectedExpense}
+                onClose={() => setSelectedExpense(null)}
+                expense={selectedExpense}
+                source={source}
+                onUpdate={refresh}
+            />
 
             <BottomNav />
         </main>

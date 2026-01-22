@@ -145,6 +145,49 @@ function doPost(e) {
       return responseJSON({error: 'Transaction not found'});
     }
 
+    if (action === 'updateCategory') {
+      // Update BOTH Main and Yahoo sheets
+      ['main', 'yahoo'].forEach(src => {
+        const targetSheets = getTargetSheets(src);
+        
+        // 1. Update existing transactions in Data Sheet
+        const sheet = ss.getSheetByName(targetSheets.data);
+        const targetMerchant = params.merchant; 
+        const newCategory = params.category;
+        
+        if (sheet) {
+           const data = sheet.getDataRange().getValues();
+           for (let i = 1; i < data.length; i++) {
+             if (data[i][1] === targetMerchant) {
+               sheet.getRange(i + 1, 4).setValue(newCategory);
+             }
+           }
+        }
+
+        // 2. Update/Add Rule in Config Sheet for Future
+        const configSheet = ss.getSheetByName(targetSheets.config);
+        if (configSheet) {
+          const configData = configSheet.getDataRange().getValues();
+          let ruleUpdated = false;
+          
+          // Check if rule exists
+          for (let i = 1; i < configData.length; i++) {
+            if (normalizeText(configData[i][0]) === normalizeText(targetMerchant)) { // Keyword match
+               configSheet.getRange(i + 1, 2).setValue(newCategory); // Update Category
+               ruleUpdated = true;
+               break;
+            }
+          }
+          
+          // If no existing rule, append new one
+          if (!ruleUpdated) {
+            configSheet.appendRow([targetMerchant, newCategory]);
+          }
+        }
+      });
+      return responseJSON({success: true, message: 'Updated categories in Data and Config sheets'});
+    }
+
     return responseJSON({error: 'Unknown action'});
 
   } catch (err) {
@@ -295,14 +338,12 @@ function parseEmailBody(body) {
   return items;
 }
 
-
 function extractOliveEmails() {
   console.log("--- Starting Olive (Vpass) Extraction ---");
   const sheets = getTargetSheets('yahoo'); // Use Yahoo sheets for Olive
   const categoryMap = getCategoryMap(sheets.config);
   
-  // Olive search query (Adjust source domain if needed, e.g. vpass.ne.jp)
-  const query = 'subject:利用のお知らせ newer_than:2d "三井住友カード"'; 
+  const query = 'from:statement@vpass.ne.jp subject:利用のお知らせ newer_than:5d';
   const threads = GmailApp.search(query);
   
   if (threads.length === 0) return;
@@ -316,11 +357,11 @@ function extractOliveEmails() {
   for (const threadMessages of messages) {
     for (const message of threadMessages) {
       if (existingIds.has(message.getId())) continue;
-      
-      const body = message.getPlainBody();
-      if (!body.includes('ご利用内容')) continue;
 
+      const body = message.getPlainBody();
+      console.log('Processed Email Body:', body.substring(0, 200)); // Debug log
       const items = parseOliveBody(body);
+      console.log('Items parsed:', JSON.stringify(items));
       for (const item of items) {
         const category = determineCategory(item.merchant, categoryMap);
         newRows.push([
@@ -338,49 +379,55 @@ function extractOliveEmails() {
   }
   
   if (newRows.length > 0) {
+    console.log('New Rows to add:', JSON.stringify(newRows));
     sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
   }
 }
 
 function parseOliveBody(body) {
-  // Olive format:
-  // ご利用日時：2026/01/16 20:16
-  // MCDONALDS MOBILE ORDER/AP（買物）	130円
+  // Olive format (Actual):
+  // ◇利用日：2026/01/22 14:48
+  // ◇利用先：FAMILYMART
+  // ◇利用取引：買物
+  // ◇利用金額：322円
   
   const items = [];
-  const dateRegex = /ご利用日時：(\d{4}\/\d{1,2}\/\d{1,2})/;
-  const amountRegex = /([0-9,]+)円/;
-  
   const lines = body.split(/\r?\n/);
-  let date = null;
   
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+  let tempItem = {};
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
     
-    // Find Date line
-    const dateMatch = line.match(dateRegex);
+    // Parse Date
+    // Match: ◇利用日：2026/01/22 14:48
+    const dateMatch = trimmed.match(/◇利用日：(\d{4}\/\d{1,2}\/\d{1,2})/);
     if (dateMatch) {
-      date = dateMatch[1];
-      // The NEXT non-empty line usually contains Merchant and Amount
-      let nextLineIndex = i + 1;
-      while(nextLineIndex < lines.length && lines[nextLineIndex].trim() === "") {
-        nextLineIndex++;
-      }
+      tempItem.date = dateMatch[1];
+    }
+    
+    // Parse Merchant
+    // Match: ◇利用先：FAMILYMART
+    const merchantMatch = trimmed.match(/◇利用先：(.+)/);
+    if (merchantMatch) {
+      tempItem.merchant = merchantMatch[1].trim();
+    }
+    
+    // Parse Amount
+    // Match: ◇利用金額：322円
+    const amountMatch = trimmed.match(/◇利用金額：([0-9,]+)円/);
+    if (amountMatch) {
+      const amount = parseInt(amountMatch[1].replace(/,/g, ''), 10);
       
-      if (nextLineIndex < lines.length) {
-        const detailLine = lines[nextLineIndex].trim();
-        const amountMatch = detailLine.match(amountRegex);
-        
-        if (amountMatch) {
-          const amount = parseInt(amountMatch[1].replace(/,/g, ''), 10);
-          let merchant = detailLine.replace(amountMatch[0], '').trim();
-          
-          items.push({
-            date: date,
-            merchant: merchant,
-            amount: amount
-          });
-        }
+      // If we have Date and Merchant, push the item
+      if (tempItem.date && tempItem.merchant) {
+         items.push({
+           date: tempItem.date,
+           merchant: tempItem.merchant,
+           amount: amount
+         });
+         // Reset for next potential item (though usually 1 per mail)
+         tempItem = {}; 
       }
     }
   }
