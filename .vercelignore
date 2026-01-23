@@ -1,0 +1,11 @@
+# Exclude from Vercel deployment
+.git
+.env
+.env.local
+.env.*
+node_modules
+/build
+/.next
+/.vercel
+*.log
+.DS_Store

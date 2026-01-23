@@ -27,7 +27,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
     });
 
     const categories = {
-        Expense: ['食費', '日用品', '交通費', '交際費', '趣味', '住居費', '光熱費', '通信費', 'その他'],
+        Expense: ['未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費', '医療費', '光熱費', 'その他', '固定費', '身だしなみ'],
         Income: ['給料', '臨時収入', '賞与', 'その他']
     };
 
@@ -72,16 +72,16 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
     const headerBg = isYahoo ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
 
     return (
-        <main className={clsx("min-h-screen pb-24 transition-colors", bgColor)}>
+        <main className={clsx("min-h-screen pb-24 transition-colors", bgColor)} >
             {/* Header */}
-            <header className={clsx("px-6 py-4 sticky top-0 z-10 shadow-sm safe-area-top flex justify-between items-center", headerBg)}>
+            < header className={clsx("px-6 py-4 sticky top-0 z-10 shadow-sm safe-area-top flex justify-between items-center", headerBg)} >
                 <h1 className={clsx("text-xl font-bold", textColor)}>
                     {isYahoo ? '個人kakeibo管理' : '管理・入力'}
                 </h1>
-            </header>
+            </header >
 
             {/* Tabs */}
-            <div className="px-4 py-4">
+            < div className="px-4 py-4" >
                 <div className={clsx("flex p-1 rounded-xl border shadow-sm", isYahoo ? "bg-slate-900 border-slate-800" : "bg-white border-gray-200")}>
                     <button
                         onClick={() => setActiveTab('entry')}
@@ -106,10 +106,10 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                         固定費設定
                     </button>
                 </div>
-            </div>
+            </div >
 
             {/* Content Area */}
-            <div className="px-4 space-y-6">
+            < div className="px-4 space-y-6" >
 
                 {activeTab === 'entry' && (
                     <div className="space-y-6">
@@ -205,15 +205,18 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                             </div>
                         </section>
                     </div>
-                )}
+                )
+                }
 
-                {activeTab === 'fixed' && (
-                    <FixedCostSection categories={categories} source={source} isDarkMode={isYahoo} />
-                )}
+                {
+                    activeTab === 'fixed' && (
+                        <FixedCostSection categories={categories} source={source} isDarkMode={isYahoo} />
+                    )
+                }
 
-            </div>
+            </div >
             <BottomNav />
-        </main>
+        </main >
     );
 }
 
@@ -229,7 +232,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
         name: '',
         amount: '',
         day: '27',
-        category: '住居費'
+        category: '固定費'
     });
 
     const days = Array.from({ length: 31 }, (_, i) => i + 1);
@@ -375,7 +378,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
                     <div className="space-y-4">
                         <div className={clsx("flex p-1 rounded-lg", isDarkMode ? "bg-slate-800" : "bg-gray-100")}>
                             <button
-                                onClick={() => setNewItem({ ...newItem, type: 'Expense', category: '住居費' })}
+                                onClick={() => setNewItem({ ...newItem, type: 'Expense', category: '固定費' })}
                                 className={clsx("flex-1 py-1.5 text-xs font-bold rounded-md transition-all", newItem.type === 'Expense' ? "bg-white text-gray-800 shadow-sm" : "text-gray-400")}
                             >
                                 支出
