@@ -1,5 +1,7 @@
 # My Kakeibo (Personal Finance Tracker)
 
+<img width="290" alt="Image" src="https://github.com/user-attachments/assets/2848e94d-bcb2-4f81-9a32-524c900123ae" />
+
 Googleスプレッドシートと連携する、個人用の家計簿アプリケーションです。
 Next.js (App Router) で構築され、Vercel上にデプロイされています。
 
