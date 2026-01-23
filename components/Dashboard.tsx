@@ -11,7 +11,13 @@ import ExpenseDetailModal from './ExpenseDetailModal';
 import { Expense } from '@/lib/api';
 
 // Lovely color palette for finance categories
+// Lovely color palette for finance categories
 const COLORS = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#14b8a6'];
+
+const CATEGORIES = [
+    '未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費',
+    '医療費', '光熱費', 'その他', '固定費', '身だしなみ'
+];
 
 interface DashboardProps {
     source?: string;
@@ -69,12 +75,31 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
         });
 
         return Object.entries(catTotals)
-            .map(([name, value], index) => ({
-                name,
-                value,
-                color: COLORS[index % COLORS.length]
-            }))
-            .sort((a, b) => b.value - a.value);
+            .map(([name, value], index) => {
+                let colorIndex;
+                const knownIndex = CATEGORIES.indexOf(name);
+                if (knownIndex >= 0) {
+                    colorIndex = knownIndex;
+                } else {
+                    // Generates a deterministic index for unknown categories based on string hash
+                    const hash = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+                    colorIndex = hash;
+                }
+
+                return {
+                    name,
+                    value,
+                    color: COLORS[colorIndex % COLORS.length]
+                };
+            })
+            .sort((a, b) => {
+                const indexA = CATEGORIES.indexOf(a.name);
+                const indexB = CATEGORIES.indexOf(b.name);
+                // If not in list, put at end
+                const posA = indexA === -1 ? 999 : indexA;
+                const posB = indexB === -1 ? 999 : indexB;
+                return posA - posB;
+            });
     }, [currentViewData]);
 
     // Reset category filter when month changes
@@ -234,7 +259,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
 
                 {/* Chart */}
                 {categoryChartData.length > 0 ? (
-                    <div className="h-64 -my-4 relative z-0">
+                    <div className="h-64 -my-4 relative z-0 outline-none" style={{ outline: 'none' }}>
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie
@@ -246,21 +271,14 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                                     paddingAngle={5}
                                     dataKey="value"
                                     stroke={isDarkMode ? "#020617" : "#fff"}
+                                    startAngle={90}
+                                    endAngle={-270}
+                                    isAnimationActive={true}
                                 >
                                     {categoryChartData.map((entry, index) => (
-                                        <Cell key={`cell-${index}`} fill={entry.color} stroke="none" />
+                                        <Cell key={`cell-${index}`} fill={entry.color} stroke="none" style={{ outline: 'none' }} />
                                     ))}
                                 </Pie>
-                                <Tooltip
-                                    formatter={(value: any) => [`¥${(value || 0).toLocaleString()}`, '金額']}
-                                    contentStyle={{
-                                        borderRadius: '12px',
-                                        border: 'none',
-                                        boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-                                        backgroundColor: isDarkMode ? '#1e293b' : '#fff',
-                                        color: isDarkMode ? '#fff' : '#000'
-                                    }}
-                                />
                             </PieChart>
                         </ResponsiveContainer>
                         {/* Center Text (Total) */}
