@@ -12,9 +12,8 @@ interface ExpenseDetailModalProps {
 }
 
 const CATEGORIES = [
-    '食費', '日用品', '交通費', '交際費', '趣味・娯楽', '衣服・美容',
-    '健康・医療', '通信費', '水道・光熱費', '住居費', '教育・教養',
-    '特別費', '雑費', '給料', 'その他'
+    '未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費',
+    '医療費', '光熱費', 'その他', '固定費', '身だしなみ'
 ];
 
 export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 'main', onUpdate }: ExpenseDetailModalProps) {
