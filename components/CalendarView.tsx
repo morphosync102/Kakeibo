@@ -239,10 +239,10 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                         key={`${item.id}-${index}`}
                                         className={clsx("p-4 rounded-xl shadow-sm border flex justify-between items-center group relative overflow-hidden", cardBg)}
                                     >
-                                        <div>
-                                            <div className={clsx("font-medium line-clamp-1", textColor)}>{item.merchant}</div>
+                                        <div className="flex-1 min-w-0 mr-2">
+                                            <div className={clsx("font-medium truncate", textColor)}>{item.merchant}</div>
                                             <span className={clsx(
-                                                "inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full",
+                                                "inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap",
                                                 item.type === 'Income'
                                                     ? (isDarkMode ? "bg-emerald-900/30 text-emerald-400" : "bg-emerald-100 text-emerald-600")
                                                     : (isDarkMode ? "bg-slate-800 text-slate-400" : "bg-gray-100 text-gray-500")
@@ -250,9 +250,9 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                                 {item.category || '未分類'}
                                             </span>
                                         </div>
-                                        <div className="flex items-center gap-4">
+                                        <div className="flex items-center gap-3 shrink-0">
                                             <div className={clsx(
-                                                "text-lg font-bold",
+                                                "text-lg font-bold whitespace-nowrap",
                                                 item.type === 'Income'
                                                     ? (isDarkMode ? "text-emerald-400" : "text-emerald-600")
                                                     : (isDarkMode ? "text-gray-100" : "text-gray-900")
@@ -276,7 +276,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                                         alert('削除に失敗しました');
                                                     }
                                                 }}
-                                                className="text-xs text-red-300 hover:text-red-500 px-2 py-1"
+                                                className="text-xs text-red-300 hover:text-red-500 px-2 py-1 whitespace-nowrap"
                                             >
                                                 削除
                                             </button>

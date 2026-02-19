@@ -259,7 +259,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
 
                 {/* Chart */}
                 {categoryChartData.length > 0 ? (
-                    <div className="h-64 -my-4 relative z-0 outline-none" style={{ outline: 'none' }}>
+                    <div className="h-64 -my-4 relative z-0 outline-none" style={{ outline: 'none', WebkitTapHighlightColor: 'transparent' }}>
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie
