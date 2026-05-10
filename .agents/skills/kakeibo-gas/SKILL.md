@@ -74,6 +74,20 @@ Report content:
 - Expense totals by category and category previous-month difference
 - Top 5 high expense rows, expense only, sorted by amount descending
 
+## Email Imports
+
+`runEmailExtraction()` imports card notification emails into the spreadsheet:
+
+- Rakuten card emails go to `Data`.
+- Vpass / Olive emails go to `Yahoo_Data`.
+- JCB shopping notification emails from `mail@qa.jcb.co.jp` go to `Yahoo_Data`.
+
+JCB parser fields:
+
+- `【ご利用日時(日本時間)】` -> Date
+- `【ご利用金額】` -> Amount
+- `【ご利用先】` -> Merchant
+
 ## LINE Messaging API
 
 Use the LINE Messaging API Push endpoint:

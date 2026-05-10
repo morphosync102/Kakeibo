@@ -115,3 +115,24 @@ test('monthly report target month is the previous calendar month', () => {
   assert.equal(target.getMonth(), 11);
   assert.equal(target.getDate(), 1);
 });
+
+test('JCB shopping notification body is parsed for Yahoo data import', () => {
+  const gas = loadGasSandbox();
+  const body = `
+カード名称　：　【ＯＳ】ＪＣＢカードＷ　ＮＬ
+
+【ご利用日時(日本時間)】　2026/05/10 13:22
+【ご利用金額】　118円
+【ご利用先】　フアミリ－マ－ト
+
+▼ご留意点
+`;
+
+  assert.deepEqual(JSON.parse(JSON.stringify(gas.parseJcbBody(body))), [
+    {
+      date: '2026/05/10',
+      merchant: 'フアミリ－マ－ト',
+      amount: 118,
+    },
+  ]);
+});

@@ -342,6 +342,7 @@ function processFixedCostsForSource(source) {
 function runEmailExtraction() {
   extractRakutenEmails(); // Existing
   extractOliveEmails();   // New
+  extractJcbEmails();     // JCB
 }
 
 function extractRakutenEmails() {
@@ -490,6 +491,62 @@ function parseOliveBody(body) {
     }
   }
   return items;
+}
+
+function extractJcbEmails() {
+  console.log("--- Starting JCB Extraction ---");
+  const sheets = getTargetSheets('yahoo');
+  const categoryMap = getCategoryMap(sheets.config);
+
+  const query = 'from:mail@qa.jcb.co.jp subject:ショッピングご利用のお知らせ newer_than:5d';
+  const threads = GmailApp.search(query);
+
+  if (threads.length === 0) return;
+
+  const messages = GmailApp.getMessagesForThreads(threads);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheets.data);
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = [];
+
+  for (const threadMessages of messages) {
+    for (const message of threadMessages) {
+      if (existingIds.has(message.getId())) continue;
+
+      const items = parseJcbBody(message.getPlainBody());
+      for (const item of items) {
+        const category = determineCategory(item.merchant, categoryMap);
+        newRows.push([
+          item.date,
+          item.merchant,
+          item.amount,
+          category,
+          message.getId(),
+          new Date(),
+          'Expense'
+        ]);
+      }
+    }
+  }
+
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    clearCache('yahoo');
+  }
+}
+
+function parseJcbBody(body) {
+  const dateMatch = body.match(/【ご利用日時\(日本時間\)】\s*([0-9]{4}\/[0-9]{1,2}\/[0-9]{1,2})/);
+  const amountMatch = body.match(/【ご利用金額】\s*([0-9,]+)円/);
+  const merchantMatch = body.match(/【ご利用先】\s*(.+)/);
+
+  if (!dateMatch || !amountMatch || !merchantMatch) return [];
+
+  return [{
+    date: dateMatch[1],
+    merchant: merchantMatch[1].trim(),
+    amount: parseInt(amountMatch[1].replace(/,/g, ''), 10)
+  }];
 }
 
 // --- Shared Helpers ---
