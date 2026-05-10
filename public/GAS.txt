@@ -498,7 +498,7 @@ function extractJcbEmails() {
   const sheets = getTargetSheets('yahoo');
   const categoryMap = getCategoryMap(sheets.config);
 
-  const query = 'from:mail@qa.jcb.co.jp subject:ショッピングご利用のお知らせ newer_than:5d';
+  const query = 'from:mail@qa.jcb.co.jp subject:"JCBカード／ショッピングご利用のお知らせ" newer_than:5d';
   const threads = GmailApp.search(query);
 
   if (threads.length === 0) return;
