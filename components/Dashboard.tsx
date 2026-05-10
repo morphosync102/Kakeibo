@@ -5,7 +5,7 @@ import { useEffect, useState, useRef, useMemo } from 'react';
 import { format } from 'date-fns';
 import { RefreshCw, Calendar as CalendarIcon } from 'lucide-react';
 import { clsx } from 'clsx';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import BottomNav from '@/components/BottomNav';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import { Expense } from '@/lib/api';
@@ -27,7 +27,10 @@ interface DashboardProps {
 export default function Dashboard({ source, isDarkMode = false }: DashboardProps) {
     const { expenses, loading, refresh } = useExpenses(source);
     const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy/MM'));
-    const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+    const [selectedCategoryState, setSelectedCategoryState] = useState<{ month: string; category: string | null }>(() => ({
+        month: format(new Date(), 'yyyy/MM'),
+        category: null,
+    }));
     const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
     const [isScrolledToEnd, setIsScrolledToEnd] = useState(false);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -75,7 +78,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
         });
 
         return Object.entries(catTotals)
-            .map(([name, value], index) => {
+            .map(([name, value]) => {
                 let colorIndex;
                 const knownIndex = CATEGORIES.indexOf(name);
                 if (knownIndex >= 0) {
@@ -102,10 +105,13 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
             });
     }, [currentViewData]);
 
-    // Reset category filter when month changes
-    useEffect(() => {
-        setSelectedCategory(null);
-    }, [selectedMonth]);
+    const selectedCategory = selectedCategoryState.month === selectedMonth ? selectedCategoryState.category : null;
+    const updateSelectedCategory = (category: string | null | ((previous: string | null) => string | null)) => {
+        setSelectedCategoryState(previous => ({
+            month: selectedMonth,
+            category: typeof category === 'function' ? category(previous.month === selectedMonth ? previous.category : null) : category,
+        }));
+    };
 
     // Filtered List Data
     const filteredViewData = useMemo(() => {
@@ -259,7 +265,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
 
                 {/* Chart */}
                 {categoryChartData.length > 0 ? (
-                    <div className="h-64 -my-4 relative z-0 outline-none" style={{ outline: 'none', WebkitTapHighlightColor: 'transparent' }}>
+                    <div className="h-64 -my-4 relative z-0 outline-none" style={{ outline: 'none' }}>
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie
@@ -300,7 +306,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                     {categoryChartData.map((item, i) => (
                         <button
                             key={i}
-                            onClick={() => setSelectedCategory(prev => prev === item.name ? null : item.name)}
+                            onClick={() => updateSelectedCategory(prev => prev === item.name ? null : item.name)}
                             className={clsx(
                                 "p-3 rounded-xl shadow-sm border flex items-center justify-between transition-all",
                                 selectedCategory === item.name
@@ -329,7 +335,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                     </span>
                     {selectedCategory && (
                         <button
-                            onClick={() => setSelectedCategory(null)}
+                            onClick={() => updateSelectedCategory(null)}
                             className="text-xs text-indigo-500 hover:underline"
                         >
                             解除

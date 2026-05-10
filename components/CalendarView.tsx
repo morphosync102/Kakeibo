@@ -168,7 +168,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
 
                     {/* Calendar Grid */}
                     <div className="grid grid-cols-7 gap-1 px-2 pb-2">
-                        {calendarDays.map((day, idx) => {
+                        {calendarDays.map((day) => {
                             // Separate calculations
                             const dayExpenses = expenses.filter(item => isSameDay(new Date(item.date), day));
                             const incomeSum = dayExpenses.filter(i => i.type === 'Income').reduce((s, i) => s + i.amount, 0);
@@ -272,7 +272,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                                         });
                                                         alert('削除しました');
                                                         refresh();
-                                                    } catch (err) {
+                                                    } catch {
                                                         alert('削除に失敗しました');
                                                     }
                                                 }}

@@ -1,19 +1,29 @@
 'use client';
 
 import BottomNav from '@/components/BottomNav';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { clsx } from 'clsx';
 import { PlusCircle, RefreshCw, Check, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
-import { useRouter } from 'next/navigation';
 
 interface ManageViewProps {
     source?: string;
     isDarkMode?: boolean;
 }
 
+type TransactionType = 'Expense' | 'Income';
+type Categories = Record<TransactionType, string[]>;
+
+interface FixedCost {
+    id: number;
+    type: TransactionType;
+    name: string;
+    amount: number;
+    day: number;
+    category: string;
+}
+
 export default function ManageView({ source, isDarkMode }: ManageViewProps) {
-    const router = useRouter();
     const isYahoo = source === 'yahoo' || isDarkMode; // Simplify check
 
     const [activeTab, setActiveTab] = useState<'entry' | 'fixed'>('entry');
@@ -26,7 +36,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
         category: '食費'
     });
 
-    const categories = {
+    const categories: Categories = {
         Expense: ['未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費', '医療費', '光熱費', 'その他', '固定費', '身だしなみ'],
         Income: ['給料', '臨時収入', '賞与', 'その他']
     };
@@ -220,8 +230,8 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
     );
 }
 
-function FixedCostSection({ categories, source, isDarkMode }: { categories: any, source?: string, isDarkMode?: boolean }) {
-    const [fixedCosts, setFixedCosts] = useState<any[]>([]);
+function FixedCostSection({ categories, source, isDarkMode }: { categories: Categories, source?: string, isDarkMode?: boolean }) {
+    const [fixedCosts, setFixedCosts] = useState<FixedCost[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
     const [showForm, setShowForm] = useState(false);
@@ -238,7 +248,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
     const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
     // Initial Fetch
-    const fetchFixedCosts = async () => {
+    const fetchFixedCosts = useCallback(async () => {
         setIsLoading(true);
         try {
             // Add timestamp to prevent caching and source
@@ -252,12 +262,12 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
         } finally {
             setIsLoading(false);
         }
-    };
+    }, [source]);
 
     // Load data when component mounts
-    useState(() => {
+    useEffect(() => {
         fetchFixedCosts();
-    });
+    }, [fetchFixedCosts]);
 
     const handleAdd = async () => {
         if (!newItem.name || !newItem.amount) {
@@ -278,7 +288,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
             setShowForm(false);
             setNewItem({ ...newItem, name: '', amount: '' });
             fetchFixedCosts(); // Refresh list
-        } catch (e) {
+        } catch {
             alert('エラーが発生しました');
         } finally {
             setIsAdding(false);
@@ -298,7 +308,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
                 })
             });
             fetchFixedCosts(); // Refresh list
-        } catch (e) {
+        } catch {
             alert('削除に失敗しました');
         }
     };
@@ -409,7 +419,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: any,
                                     onChange={(e) => setNewItem({ ...newItem, category: e.target.value })}
                                     className={clsx("w-full border rounded-lg p-2 text-sm outline-none", isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200")}
                                 >
-                                    {(newItem.type === 'Income' ? categories.Income : categories.Expense).map((c: string) => (
+                                    {(newItem.type === 'Income' ? categories.Income : categories.Expense).map((c) => (
                                         <option key={c} value={c}>{c}</option>
                                     ))}
                                 </select>

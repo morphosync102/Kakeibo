@@ -1,0 +1,750 @@
+/**
+ * Kakeibo Automation - Universal Ver 2.2 (Multi-Source Support + Caching)
+ * Supports: Main & Yahoo (Olive) Sheets
+ */
+
+const SHEET_ID = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
+
+// Default Sheets
+const DATA_SHEET_NAME = 'Data';
+const CONFIG_SHEET_NAME = 'Config';
+const FIXED_SHEET_NAME = 'Fixed';
+
+// Yahoo (Olive) Sheets
+const YAHOO_DATA_SHEET_NAME = 'Yahoo_Data';
+const YAHOO_CONFIG_SHEET_NAME = 'Yahoo_Config';
+const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
+
+// Cache Configuration
+const CACHE_TTL = 21600; // 6 hours (Max allowed)
+
+// --- Helper: Get Target Sheet Names based on source ---
+function getTargetSheets(source) {
+  if (source === 'yahoo') {
+    return {
+      data: YAHOO_DATA_SHEET_NAME,
+      config: YAHOO_CONFIG_SHEET_NAME,
+      fixed: YAHOO_FIXED_SHEET_NAME
+    };
+  }
+  return {
+    data: DATA_SHEET_NAME,
+    config: CONFIG_SHEET_NAME,
+    fixed: FIXED_SHEET_NAME
+  };
+}
+
+// --- Helper: Cache Management ---
+function getCacheKey(source, type) {
+  return `kakeibo_${source || 'main'}_${type}`;
+}
+
+function clearCache(source) {
+  const cache = CacheService.getScriptCache();
+  // Clear both data and fixed costs cache for the source
+  cache.removeAll([
+    getCacheKey(source, 'data'),
+    getCacheKey(source, 'fixed')
+  ]);
+  // Also clear 'main' if source is undefined, just to be safe
+  if (!source) {
+    cache.removeAll([
+      getCacheKey('main', 'data'),
+      getCacheKey('main', 'fixed')
+    ]);
+  }
+}
+
+// --- API: Read Data ---
+function doGet(e) {
+  const action = e.parameter.action;
+  const source = e.parameter.source; // 'yahoo' or undefined
+
+  if (action === 'getFixedCosts') {
+    return getFixedCostsWithCache(source);
+  }
+
+  // Default: Get Expenses
+  return getExpensesWithCache(source);
+}
+
+function getFixedCostsWithCache(source) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = getCacheKey(source, 'fixed');
+  const cached = cache.get(cacheKey);
+
+  if (cached) {
+    return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheets = getTargetSheets(source);
+  const sheet = ss.getSheetByName(sheets.fixed);
+
+  if (!sheet) return responseJSON([]);
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length > 0) data.shift(); // Remove header
+
+  const fixedCosts = data.map((row, index) => ({
+    id: index,
+    type: row[0],
+    name: row[1],
+    amount: row[2],
+    day: row[3],
+    category: row[4]
+  }));
+
+  const jsonStr = JSON.stringify(fixedCosts);
+  cache.put(cacheKey, jsonStr, CACHE_TTL);
+
+  return ContentService.createTextOutput(jsonStr).setMimeType(ContentService.MimeType.JSON);
+}
+
+function getExpensesWithCache(source) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = getCacheKey(source, 'data');
+  const cached = cache.get(cacheKey);
+
+  if (cached) {
+    return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheets = getTargetSheets(source);
+  const sheet = ss.getSheetByName(sheets.data);
+
+  if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length > 0) data.shift(); // Remove header
+
+  const formattedMsg = data.map(row => {
+    let dateStr = row[0];
+    if (dateStr instanceof Date) {
+        dateStr = Utilities.formatDate(dateStr, Session.getScriptTimeZone(), "yyyy/MM/dd");
+    }
+
+    return {
+      id: row[4], // MessageId
+      date: dateStr,
+      merchant: row[1],
+      amount: row[2],
+      category: row[3],
+      type: row[6] || 'Expense' // Column G (Index 6)
+    };
+  });
+
+  const jsonStr = JSON.stringify(formattedMsg);
+  cache.put(cacheKey, jsonStr, CACHE_TTL);
+
+  return ContentService.createTextOutput(jsonStr).setMimeType(ContentService.MimeType.JSON);
+}
+
+// --- API: Write Data ---
+function doPost(e) {
+  try {
+    const params = JSON.parse(e.postData.contents);
+    const action = params.action;
+    const source = params.source; // 'yahoo' or undefined
+    const sheets = getTargetSheets(source);
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+
+    let result = { error: 'Unknown action' };
+    let shouldClearCache = false;
+
+    if (action === 'addTransaction') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+      sheet.appendRow([
+        params.date,
+        params.merchant,
+        Number(params.amount),
+        Number(params.amount) > 0 && params.type !== 'Income' ? params.category : (params.category || '未分類'),
+        'manual_' + new Date().getTime(),
+        new Date(),
+        params.type || 'Expense'
+      ]);
+      result = {success: true, message: 'Added transaction'};
+      shouldClearCache = true;
+    }
+
+    else if (action === 'addFixedCost') {
+      const sheet = ss.getSheetByName(sheets.fixed);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+
+      sheet.appendRow([
+        params.type,
+        params.name,
+        Number(params.amount),
+        Number(params.day),
+        params.category
+      ]);
+      result = {success: true};
+      shouldClearCache = true;
+    }
+
+    else if (action === 'deleteFixedCost') {
+       const sheet = ss.getSheetByName(sheets.fixed);
+       if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+
+       const rowIndex = parseInt(params.id) + 2;
+       sheet.deleteRow(rowIndex);
+       result = {success: true};
+       shouldClearCache = true;
+    }
+
+    else if (action === 'deleteTransaction') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+      const data = sheet.getDataRange().getValues();
+      const targetId = params.id;
+
+      let found = false;
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][4]) === String(targetId)) {
+          sheet.deleteRow(i + 1);
+          found = true;
+          break;
+        }
+      }
+
+      if (found) {
+        result = {success: true, message: 'Deleted'};
+        shouldClearCache = true;
+      } else {
+        result = {error: 'Transaction not found'};
+      }
+    }
+
+    else if (action === 'updateCategory') {
+      // Update BOTH Main and Yahoo sheets
+      ['main', 'yahoo'].forEach(src => {
+        const targetSheets = getTargetSheets(src);
+
+        // 1. Update existing transactions in Data Sheet
+        const sheet = ss.getSheetByName(targetSheets.data);
+        const targetMerchant = params.merchant;
+        const newCategory = params.category;
+
+        if (sheet) {
+           const data = sheet.getDataRange().getValues();
+           for (let i = 1; i < data.length; i++) {
+             if (data[i][1] === targetMerchant) {
+               sheet.getRange(i + 1, 4).setValue(newCategory);
+             }
+           }
+        }
+
+        // 2. Update/Add Rule in Config Sheet for Future
+        const configSheet = ss.getSheetByName(targetSheets.config);
+        if (configSheet) {
+          const configData = configSheet.getDataRange().getValues();
+          let ruleUpdated = false;
+
+          for (let i = 1; i < configData.length; i++) {
+            if (normalizeText(configData[i][0]) === normalizeText(targetMerchant)) { // Keyword match
+               configSheet.getRange(i + 1, 2).setValue(newCategory); // Update Category
+               ruleUpdated = true;
+               break;
+            }
+          }
+
+          if (!ruleUpdated) {
+            configSheet.appendRow([targetMerchant, newCategory]);
+          }
+        }
+      });
+      result = {success: true, message: 'Updated categories in Data and Config sheets'};
+
+      // Clear cache for ALL sources since category update affects all
+      clearCache(null); // Clears main
+      clearCache('yahoo');
+      shouldClearCache = false; // Already handled
+    }
+
+    if (shouldClearCache) {
+      clearCache(source);
+    }
+
+    return responseJSON(result);
+
+  } catch (err) {
+    return responseJSON({error: err.toString()});
+  }
+}
+
+function responseJSON(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// --- Automation: Process Fixed Costs (Daily Trigger) ---
+function processFixedCosts() {
+  processFixedCostsForSource(); // Default
+  processFixedCostsForSource('yahoo'); // Yahoo
+}
+
+function processFixedCostsForSource(source) {
+  console.log(`--- Checking Fixed Costs for: ${source || 'default'} ---`);
+  const sheets = getTargetSheets(source);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+
+  const fixedSheet = ss.getSheetByName(sheets.fixed);
+  const dataSheet = ss.getSheetByName(sheets.data);
+
+  if (!fixedSheet || !dataSheet) return;
+
+  const today = new Date();
+  const currentDay = today.getDate();
+  const currentMonthStr = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM");
+
+  const fixedData = fixedSheet.getDataRange().getValues();
+  if (fixedData.length > 0) fixedData.shift();
+
+  const existingIds = getExistingMessageIds(dataSheet);
+  const newRows = [];
+
+  fixedData.forEach(row => {
+    // 0:Type, 1:Name, 2:Amount, 3:Day, 4:Category
+    const scheduledDay = row[3];
+
+    if (Number(scheduledDay) === currentDay) {
+       const uniqueId = `fixed_${currentMonthStr.replace('/', '')}_${row[1]}_${source || 'main'}`;
+
+       if (!existingIds.has(uniqueId)) {
+         console.log(`Adding: ${row[1]}`);
+         const dateStr = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM/dd");
+
+         newRows.push([
+           dateStr,
+           row[1], // Name
+           row[2], // Amount
+           row[4], // Category
+           uniqueId,
+           new Date(),
+           row[0]  // Type
+         ]);
+       }
+    }
+  });
+
+  if (newRows.length > 0) {
+    dataSheet.getRange(dataSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+
+    // Clear cache since we added data
+    clearCache(source);
+  }
+}
+
+// --- Email Extraction (Main & Olive) ---
+function runEmailExtraction() {
+  extractRakutenEmails(); // Existing
+  extractOliveEmails();   // New
+}
+
+function extractRakutenEmails() {
+  console.log("--- Starting Rakuten Extraction ---");
+  const sheets = getTargetSheets('main');
+  const categoryMap = getCategoryMap(sheets.config);
+
+  const query = 'from:info@mail.rakuten-card.co.jp subject:利用のお知らせ -subject:速報版 newer_than:5d';
+  const threads = GmailApp.search(query);
+
+  if (threads.length === 0) return;
+
+  const messages = GmailApp.getMessagesForThreads(threads);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheets.data);
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = [];
+
+  for (const threadMessages of messages) {
+    for (const message of threadMessages) {
+      if (message.getSubject().includes("速報版")) continue;
+      if (existingIds.has(message.getId())) continue;
+
+      const items = parseEmailBody(message.getPlainBody());
+      for (const item of items) {
+        const category = determineCategory(item.merchant, categoryMap);
+        newRows.push([
+          item.date,
+          item.merchant,
+          item.amount,
+          category,
+          message.getId(),
+          new Date(),
+          'Expense'
+        ]);
+      }
+    }
+  }
+
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    console.log(`Added ${newRows.length} transactions.`);
+    clearCache(null); // Clear main cache
+  }
+}
+
+function parseEmailBody(body) {
+  const items = [];
+  const regexTabular = /(\d{4}\/\d{1,2}\/\d{1,2})[\s\t]+(.+?)[\s\t]+([0-9,]+)[\s]*円/g;
+  let match;
+  while ((match = regexTabular.exec(body)) !== null) {
+    if (match[2].trim().length > 0) {
+        items.push({
+        date: match[1],
+        merchant: match[2].trim(),
+        amount: parseInt(match[3].replace(/,/g, ''), 10)
+        });
+    }
+  }
+  const lines = body.split(/\r?\n/);
+  let tempItem = {};
+  for (const line of lines) {
+    if (line.includes('利用日:')) tempItem.date = line.split(':')[1].trim();
+    else if (line.includes('利用先:')) tempItem.merchant = line.split(':')[1].trim();
+    else if (line.includes('利用金額:')) {
+       const val = line.split(':')[1];
+       if (val) {
+         tempItem.amount = parseInt(val.replace('円', '').replace(/,/g, '').trim(), 10);
+         if (tempItem.date && tempItem.merchant && !isNaN(tempItem.amount)) {
+            items.push({...tempItem});
+            tempItem = {};
+         }
+       }
+    }
+  }
+  return items;
+}
+
+function extractOliveEmails() {
+  console.log("--- Starting Olive (Vpass) Extraction ---");
+  const sheets = getTargetSheets('yahoo');
+  const categoryMap = getCategoryMap(sheets.config);
+
+  const query = 'from:statement@vpass.ne.jp subject:利用のお知らせ newer_than:5d';
+  const threads = GmailApp.search(query);
+
+  if (threads.length === 0) return;
+
+  const messages = GmailApp.getMessagesForThreads(threads);
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheets.data);
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = [];
+
+  for (const threadMessages of messages) {
+    for (const message of threadMessages) {
+      if (existingIds.has(message.getId())) continue;
+
+      const body = message.getPlainBody();
+      const items = parseOliveBody(body);
+      for (const item of items) {
+        const category = determineCategory(item.merchant, categoryMap);
+        newRows.push([
+          item.date,
+          item.merchant,
+          item.amount,
+          category,
+          message.getId(),
+          new Date(),
+          'Expense'
+        ]);
+      }
+    }
+  }
+
+  if (newRows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    clearCache('yahoo'); // Clear yahoo cache
+  }
+}
+
+function parseOliveBody(body) {
+  const items = [];
+  const lines = body.split(/\r?\n/);
+  let tempItem = {};
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const dateMatch = trimmed.match(/◇利用日：(\d{4}\/\d{1,2}\/\d{1,2})/);
+    if (dateMatch) tempItem.date = dateMatch[1];
+
+    const merchantMatch = trimmed.match(/◇利用先：(.+)/);
+    if (merchantMatch) tempItem.merchant = merchantMatch[1].trim();
+
+    const amountMatch = trimmed.match(/◇利用金額：([0-9,]+)円/);
+    if (amountMatch) {
+      const amount = parseInt(amountMatch[1].replace(/,/g, ''), 10);
+      if (tempItem.date && tempItem.merchant) {
+         items.push({
+           date: tempItem.date,
+           merchant: tempItem.merchant,
+           amount: amount
+         });
+         tempItem = {};
+      }
+    }
+  }
+  return items;
+}
+
+// --- Shared Helpers ---
+
+function determineCategory(merchant, categoryMap) {
+  const normMerchant = normalizeText(merchant);
+  for (const map of categoryMap) {
+    if (normMerchant.indexOf(normalizeText(map.keyword)) !== -1) return map.category;
+  }
+  return '未分類';
+}
+
+function normalizeText(text) {
+  if (!text) return "";
+  return text.toString().normalize('NFKC').replace(/[\-－‑‒–—―]/g, 'ー').replace(/\u002d/g, 'ー').toLowerCase();
+}
+
+function getCategoryMap(sheetName) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(sheetName || CONFIG_SHEET_NAME);
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  if (data.length > 0) data.shift();
+  return data.map(row => ({ keyword: row[0], category: row[1] })).filter(r => r.keyword);
+}
+
+function getExistingMessageIds(sheet) {
+  const ids = new Set();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return ids;
+  const data = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
+  data.forEach(row => { if (row[0]) ids.add(row[0]); });
+  return ids;
+}
+
+// --- Monthly LINE Reports ---
+
+function sendMonthlyKakeiboReports() {
+  sendMonthlyKakeiboReportForSource('main');
+  sendMonthlyKakeiboReportForSource('yahoo');
+}
+
+function testSendMonthlyKakeiboReports() {
+  sendMonthlyKakeiboReports();
+}
+
+function testSendMonthlyKakeiboReportMain() {
+  sendMonthlyKakeiboReportForSource('main');
+}
+
+function testSendMonthlyKakeiboReportYahoo() {
+  sendMonthlyKakeiboReportForSource('yahoo');
+}
+
+function sendMonthlyKakeiboReportForSource(source, now) {
+  const targetMonth = getMonthlyReportTargetMonth(now || new Date());
+  const previousMonth = getPreviousMonthlyReportMonth(targetMonth);
+  const rows = getMonthlyReportRows(source, targetMonth);
+  const previousRows = getMonthlyReportRows(source, previousMonth);
+  const text = buildMonthlyKakeiboReportText(source, targetMonth, rows, previousRows);
+  const destinationKey = getMonthlyReportDestinationPropertyKey(source);
+  const destination = getScriptPropertyOrThrow(destinationKey);
+
+  pushLineTextMessage(destination, text);
+
+  return {
+    source: source || 'main',
+    destinationKey: destinationKey,
+    targetMonth: formatMonthlyReportMonth(targetMonth),
+    rows: rows.length,
+    previousRows: previousRows.length
+  };
+}
+
+function getMonthlyReportRows(source, monthStart) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheets = getTargetSheets(source);
+  const sheet = ss.getSheetByName(sheets.data);
+  if (!sheet) return [];
+
+  const values = sheet.getDataRange().getValues();
+  if (values.length > 0) values.shift();
+
+  return values.filter(row => isRowInMonthlyReportMonth(row, monthStart));
+}
+
+function isRowInMonthlyReportMonth(row, monthStart) {
+  const date = parseMonthlyReportDate(row[0]);
+  return date &&
+    date.getFullYear() === monthStart.getFullYear() &&
+    date.getMonth() === monthStart.getMonth();
+}
+
+function getMonthlyReportTargetMonth(now) {
+  return new Date(now.getFullYear(), now.getMonth() - 1, 1);
+}
+
+function getPreviousMonthlyReportMonth(monthStart) {
+  return new Date(monthStart.getFullYear(), monthStart.getMonth() - 1, 1);
+}
+
+function getMonthlyReportDestinationPropertyKey(source) {
+  return source === 'yahoo' ? 'LINE_DESTINATION_YAHOO' : 'LINE_DESTINATION_MAIN';
+}
+
+function getMonthlyReportSourceLabel(source) {
+  return source === 'yahoo' ? '個人用' : '家庭用';
+}
+
+function buildMonthlyKakeiboReportText(source, targetMonth, rows, previousRows) {
+  const summary = summarizeMonthlyReportRows(rows);
+  const previousSummary = summarizeMonthlyReportRows(previousRows);
+  const categoryLines = buildMonthlyReportCategoryLines(summary, previousSummary);
+  const topExpenseLines = buildMonthlyReportTopExpenseLines(summary.topExpenses);
+  const closingLine = summary.balance >= 0 ? 'この調子でがんばるたま〜）' : 'ちょっとお金使いすぎたまね〜）';
+
+  return [
+    'たむたむ（先月の出費はこんな感じたま〜',
+    `対象月: ${formatMonthlyReportMonth(targetMonth)}`,
+    '',
+    'サマリー (前月比)',
+    `収入: ${formatMonthlyReportCurrency(summary.income)} (${formatMonthlyReportDiff(summary.income - previousSummary.income)})`,
+    `支出: ${formatMonthlyReportCurrency(summary.expense)} (${formatMonthlyReportDiff(summary.expense - previousSummary.expense)})`,
+    `収支: ${formatMonthlyReportCurrency(summary.balance)} (${formatMonthlyReportDiff(summary.balance - previousSummary.balance)})`,
+    '',
+    'カテゴリ別支出 (前月比)',
+    categoryLines.join('\n'),
+    '',
+    '高額支出トップ5',
+    topExpenseLines.join('\n'),
+    '',
+    closingLine
+  ].join('\n');
+}
+
+function summarizeMonthlyReportRows(rows) {
+  const summary = {
+    income: 0,
+    expense: 0,
+    balance: 0,
+    categoryExpenses: {},
+    topExpenses: []
+  };
+
+  rows.forEach(row => {
+    const type = row[6] || 'Expense';
+    const amount = Number(row[2]) || 0;
+
+    if (type === 'Income') {
+      summary.income += amount;
+      return;
+    }
+
+    const expenseAmount = Math.abs(amount);
+    const category = row[3] || '未分類';
+    summary.expense += expenseAmount;
+    summary.categoryExpenses[category] = (summary.categoryExpenses[category] || 0) + expenseAmount;
+    summary.topExpenses.push({
+      date: parseMonthlyReportDate(row[0]),
+      merchant: row[1] || '不明',
+      category: category,
+      amount: expenseAmount
+    });
+  });
+
+  summary.balance = summary.income - summary.expense;
+  summary.topExpenses.sort((a, b) => b.amount - a.amount);
+  summary.topExpenses = summary.topExpenses.slice(0, 5);
+
+  return summary;
+}
+
+function buildMonthlyReportCategoryLines(summary, previousSummary) {
+  const categories = Object.keys(summary.categoryExpenses).sort((a, b) => {
+    return summary.categoryExpenses[b] - summary.categoryExpenses[a];
+  });
+
+  if (categories.length === 0) return ['なし'];
+
+  return categories.map(category => {
+    const amount = summary.categoryExpenses[category] || 0;
+    const previousAmount = previousSummary.categoryExpenses[category] || 0;
+    return `${category}: ${formatMonthlyReportCurrency(amount)} (${formatMonthlyReportDiff(amount - previousAmount)})`;
+  });
+}
+
+function buildMonthlyReportTopExpenseLines(topExpenses) {
+  if (topExpenses.length === 0) return ['なし'];
+
+  return topExpenses.map(expense => {
+    return `${formatMonthlyReportDay(expense.date)} ${expense.merchant} [${expense.category}] ${formatMonthlyReportCurrency(expense.amount)}`;
+  });
+}
+
+function pushLineTextMessage(to, text) {
+  const token = getScriptPropertyOrThrow('LINE_CHANNEL_ACCESS_TOKEN');
+  const response = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    payload: JSON.stringify({
+      to: to,
+      messages: [
+        {
+          type: 'text',
+          text: text
+        }
+      ]
+    }),
+    muteHttpExceptions: true
+  });
+
+  const responseCode = response.getResponseCode();
+  if (responseCode < 200 || responseCode >= 300) {
+    throw new Error(`LINE push failed: ${responseCode} ${response.getContentText()}`);
+  }
+}
+
+function getScriptPropertyOrThrow(key) {
+  const value = PropertiesService.getScriptProperties().getProperty(key);
+  if (!value) {
+    throw new Error(`Missing Script Property: ${key}`);
+  }
+  return value;
+}
+
+function parseMonthlyReportDate(value) {
+  if (value instanceof Date) return value;
+  if (!value) return null;
+
+  const match = value.toString().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  if (!match) return null;
+
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function formatMonthlyReportMonth(date) {
+  return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy/MM');
+}
+
+function formatMonthlyReportDay(date) {
+  if (!date) return '--/--';
+  return Utilities.formatDate(date, Session.getScriptTimeZone(), 'MM/dd');
+}
+
+function formatMonthlyReportCurrency(amount) {
+  const rounded = Math.round(amount);
+  const prefix = rounded < 0 ? '-' : '';
+  return `${prefix}¥${Math.abs(rounded).toLocaleString('ja-JP')}`;
+}
+
+function formatMonthlyReportDiff(amount) {
+  const rounded = Math.round(amount);
+  const prefix = rounded >= 0 ? '+' : '-';
+  return `${prefix}${formatMonthlyReportCurrency(Math.abs(rounded))}`;
+}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, FormEvent, Suspense } from "react";
+import { useState, useEffect, FormEvent, Suspense, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 function LoginContent() {
@@ -11,7 +11,7 @@ function LoginContent() {
     const searchParams = useSearchParams();
     const returnTo = searchParams.get('returnTo');
 
-    const performLogin = async (password: string) => {
+    const performLogin = useCallback(async (password: string) => {
         setIsLoading(true);
         setError(false);
 
@@ -32,12 +32,12 @@ function LoginContent() {
                 // However, on auto-submit failure, clearing stops the loop.
                 setInput("");
             }
-        } catch (err) {
+        } catch {
             setError(true);
         } finally {
             setIsLoading(false);
         }
-    };
+    }, [returnTo, router]);
 
     const handleLogin = (e: FormEvent) => {
         e.preventDefault();
@@ -57,7 +57,7 @@ function LoginContent() {
         }, 800);
 
         return () => clearTimeout(timer);
-    }, [input]);
+    }, [input, isLoading, performLogin]);
 
     return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-4">

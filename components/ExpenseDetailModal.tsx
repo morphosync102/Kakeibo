@@ -1,4 +1,4 @@
-import { startTransition, useOptimistic, useState } from 'react';
+import { useState } from 'react';
 import clsx from 'clsx';
 import { X, Trash2, Save, AlertCircle } from 'lucide-react';
 import { Expense } from '@/lib/api';
@@ -51,7 +51,7 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             } else {
                 alert('更新に失敗しました: ' + (data.error || 'Unknown error'));
             }
-        } catch (e) {
+        } catch {
             alert('エラーが発生しました');
         } finally {
             setIsUpdating(false);
@@ -79,7 +79,7 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             } else {
                 alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
             }
-        } catch (e) {
+        } catch {
             alert('エラーが発生しました');
         } finally {
             setIsDeleting(false);
