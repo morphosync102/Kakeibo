@@ -145,6 +145,11 @@ function getExpensesWithCache(source) {
 function doPost(e) {
   try {
     const params = JSON.parse(e.postData.contents);
+    if (isLineWebhookPayload(params)) {
+      console.log('LINE webhook received; email forwarding disabled.');
+      return responseJSON({success: true, ignored: 'lineWebhook'});
+    }
+
     const action = params.action;
     const source = params.source; // 'yahoo' or undefined
     const sheets = getTargetSheets(source);
@@ -580,6 +585,14 @@ function getExistingMessageIds(sheet) {
   const data = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
   data.forEach(row => { if (row[0]) ids.add(row[0]); });
   return ids;
+}
+
+function isLineWebhookPayload(params) {
+  return Boolean(
+    params &&
+    Array.isArray(params.events) &&
+    typeof params.destination === 'string'
+  );
 }
 
 // --- Monthly LINE Reports ---

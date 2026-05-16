@@ -26,13 +26,14 @@ interface DashboardProps {
 
 export default function Dashboard({ source, isDarkMode = false }: DashboardProps) {
     const { expenses, loading, refresh } = useExpenses(source);
-    const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy/MM'));
+    const currentMonth = format(new Date(), 'yyyy/MM');
+    const [selectedMonth, setSelectedMonth] = useState<string>(currentMonth);
     const [selectedCategoryState, setSelectedCategoryState] = useState<{ month: string; category: string | null }>(() => ({
-        month: format(new Date(), 'yyyy/MM'),
+        month: currentMonth,
         category: null,
     }));
     const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
-    const [isScrolledToEnd, setIsScrolledToEnd] = useState(false);
+    const [hasInitialScroll, setHasInitialScroll] = useState(false);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
     // Theme-based colors
@@ -56,10 +57,9 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
     // 2. Generate list of months
     const availableMonths = useMemo(() => {
         const keys = Object.keys(monthlyData);
-        const currentKey = format(new Date(), 'yyyy/MM');
-        if (!keys.includes(currentKey)) keys.push(currentKey);
+        if (!keys.includes(currentMonth)) keys.push(currentMonth);
         return keys.sort();
-    }, [monthlyData]);
+    }, [monthlyData, currentMonth]);
 
     // 3. Current View Data
     const currentViewData = useMemo(() => {
@@ -122,18 +122,19 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
         return data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }, [currentViewData, selectedCategory]);
 
-    // Scroll to end on initial load
+    // Center the current month on initial load.
     useEffect(() => {
-        if (!loading && availableMonths.length > 0 && !isScrolledToEnd && scrollContainerRef.current) {
+        if (!loading && availableMonths.length > 0 && !hasInitialScroll && scrollContainerRef.current) {
             setTimeout(() => {
                 const container = scrollContainerRef.current;
                 if (container) {
-                    container.scrollLeft = container.scrollWidth;
-                    setIsScrolledToEnd(true);
+                    const currentMonthCard = container.querySelector<HTMLElement>(`[data-month="${currentMonth}"]`);
+                    currentMonthCard?.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
+                    setHasInitialScroll(true);
                 }
             }, 100);
         }
-    }, [loading, availableMonths, isScrolledToEnd]);
+    }, [loading, availableMonths, currentMonth, hasInitialScroll]);
 
     // Observe which card is in view
     useEffect(() => {
@@ -186,7 +187,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                         const dataForMonth = monthlyData[month] || [];
                         // const total = dataForMonth.reduce((s, i) => s + i.amount, 0);
                         const isCurrent = month === selectedMonth;
-                        const isRealCurrentMonth = month === format(new Date(), 'yyyy/MM');
+                        const isRealCurrentMonth = month === currentMonth;
 
                         const income = dataForMonth.filter(d => d.type === 'Income').reduce((s, i) => s + i.amount, 0);
                         const expense = dataForMonth.filter(d => d.type !== 'Income').reduce((s, i) => s + i.amount, 0);

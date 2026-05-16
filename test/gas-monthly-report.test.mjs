@@ -116,6 +116,32 @@ test('monthly report target month is the previous calendar month', () => {
   assert.equal(target.getDate(), 1);
 });
 
+test('LINE webhook posts are acknowledged without touching spreadsheet APIs', () => {
+  const gas = loadGasSandbox();
+  gas.SpreadsheetApp.openById = () => {
+    throw new Error('Spreadsheet should not be opened for LINE webhooks');
+  };
+
+  const response = gas.doPost({
+    postData: {
+      contents: JSON.stringify({
+        destination: 'line-destination',
+        events: [
+          {
+            type: 'message',
+            message: { type: 'text', text: 'test message' },
+          },
+        ],
+      }),
+    },
+  });
+
+  assert.deepEqual(JSON.parse(response.body), {
+    success: true,
+    ignored: 'lineWebhook',
+  });
+});
+
 test('JCB shopping notification body is parsed for Yahoo data import', () => {
   const gas = loadGasSandbox();
   const body = `
