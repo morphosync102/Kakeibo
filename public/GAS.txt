@@ -224,6 +224,42 @@ function doPost(e) {
       }
     }
 
+    else if (action === 'updateTransactionDate') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+      const newDate = normalizeTransactionDate(params.date);
+      if (!newDate) return responseJSON({error: 'Invalid transaction date'});
+
+      const currentDate = normalizeTransactionDate(params.currentDate);
+      if (!currentDate) return responseJSON({error: 'Invalid current transaction date'});
+
+      const data = sheet.getDataRange().getValues();
+      let found = false;
+
+      for (let i = 1; i < data.length; i++) {
+        const rowDate = normalizeTransactionDate(data[i][0]);
+        const matches =
+          String(data[i][4]) === String(params.id) &&
+          rowDate === currentDate &&
+          String(data[i][1]) === String(params.merchant) &&
+          Number(data[i][2]) === Number(params.amount);
+
+        if (matches) {
+          sheet.getRange(i + 1, 1).setValue(newDate);
+          found = true;
+          break;
+        }
+      }
+
+      if (found) {
+        result = {success: true, message: 'Updated transaction date'};
+        shouldClearCache = true;
+      } else {
+        result = {error: 'Transaction not found'};
+      }
+    }
+
     else if (action === 'updateCategory') {
       // Update BOTH Main and Yahoo sheets
       ['main', 'yahoo'].forEach(src => {
@@ -585,6 +621,35 @@ function getExistingMessageIds(sheet) {
   const data = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
   data.forEach(row => { if (row[0]) ids.add(row[0]); });
   return ids;
+}
+
+function normalizeTransactionDate(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy/MM/dd');
+  }
+  if (!value) return null;
+
+  const match = value.toString().match(/^(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return [
+    year,
+    String(month).padStart(2, '0'),
+    String(day).padStart(2, '0')
+  ].join('/');
 }
 
 function isLineWebhookPayload(params) {
