@@ -18,6 +18,19 @@ test('expense detail modal sends strict match fields when deleting', () => {
   assert.match(modalSource, /amount: expense\.amount/);
 });
 
+test('expense detail modal can edit the amount via strict-matched updateTransaction', () => {
+  assert.match(modalSource, /action: 'updateTransaction'/);
+  assert.match(modalSource, /currentMerchant: expense\.merchant/);
+  assert.match(modalSource, /currentAmount: expense\.amount/);
+  assert.match(modalSource, /金額を保存/);
+});
+
+test('expense detail modal offers single-row and merchant-wide category scopes', () => {
+  assert.match(modalSource, /categoryScope/);
+  assert.match(modalSource, /この明細のみ/);
+  assert.match(modalSource, /この店舗すべて/);
+});
+
 test('expense detail modal confirms destructive actions without blocking dialogs', () => {
   assert.match(modalSource, /confirmingDelete/);
   assert.match(modalSource, /confirmingCategory/);

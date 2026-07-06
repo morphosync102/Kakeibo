@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { toast } from 'sonner';
-import { X, Trash2, Save, AlertCircle, CalendarDays } from 'lucide-react';
+import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-react';
 import { Expense } from '@/lib/api';
 import { EXPENSE_CATEGORIES } from '@/lib/categories';
 
@@ -22,7 +22,10 @@ function toDateInputValue(date: string) {
 export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 'main', onUpdate, onLocalRemove, onLocalUpdate }: ExpenseDetailModalProps) {
     const [selectedCategory, setSelectedCategory] = useState(expense?.category || '');
     const [selectedDate, setSelectedDate] = useState(expense ? toDateInputValue(expense.date) : '');
+    const [selectedAmount, setSelectedAmount] = useState(expense ? String(expense.amount) : '');
+    const [categoryScope, setCategoryScope] = useState<'single' | 'merchant'>('merchant');
     const [isUpdatingDate, setIsUpdatingDate] = useState(false);
+    const [isUpdatingAmount, setIsUpdatingAmount] = useState(false);
     const [confirmingCategory, setConfirmingCategory] = useState(false);
     const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -30,6 +33,8 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
         if (!isOpen || !expense) return;
         setSelectedCategory(expense.category || '未分類');
         setSelectedDate(toDateInputValue(expense.date));
+        setSelectedAmount(String(expense.amount));
+        setCategoryScope('merchant');
         setConfirmingCategory(false);
         setConfirmingDelete(false);
     }, [isOpen, expense]);
@@ -74,14 +79,87 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
         }
     };
 
+    const handleUpdateAmount = async () => {
+        const amount = Number(selectedAmount);
+        if (!selectedAmount || !isFinite(amount) || amount <= 0) {
+            toast.error('正しい金額を入力してください');
+            return;
+        }
+
+        setIsUpdatingAmount(true);
+        try {
+            const res = await fetch('/api/expenses', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'updateTransaction',
+                    source: source,
+                    id: expense.id,
+                    currentDate: expense.date,
+                    currentMerchant: expense.merchant,
+                    currentAmount: expense.amount,
+                    amount
+                }),
+            });
+            const data = await res.json();
+            if (data.success) {
+                toast.success('金額を更新しました');
+                onLocalUpdate?.(expense, { amount });
+                onUpdate();
+                onClose();
+            } else {
+                toast.error('更新に失敗しました: ' + (data.error || 'Unknown error'));
+            }
+        } catch {
+            toast.error('エラーが発生しました');
+        } finally {
+            setIsUpdatingAmount(false);
+        }
+    };
+
     // Optimistic: apply locally and close right away, reconcile in the background
     const handleUpdateCategory = () => {
+        const category = selectedCategory;
+
+        // Single-row change: strict-matched updateTransaction, no extra confirm needed
+        if (categoryScope === 'single') {
+            onLocalUpdate?.(expense, { category });
+            toast.success(`この明細のカテゴリを「${category}」に変更しました`);
+            onClose();
+
+            fetch('/api/expenses', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'updateTransaction',
+                    source: source,
+                    id: expense.id,
+                    currentDate: expense.date,
+                    currentMerchant: expense.merchant,
+                    currentAmount: expense.amount,
+                    category
+                }),
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (!data.success) {
+                        toast.error('カテゴリの更新に失敗しました: ' + (data.error || 'Unknown error'));
+                    }
+                    onUpdate();
+                })
+                .catch(() => {
+                    toast.error('カテゴリの更新に失敗しました');
+                    onUpdate();
+                });
+            return;
+        }
+
+        // Merchant-wide change also rewrites the auto-categorize rule: two-tap confirm
         if (!confirmingCategory) {
             setConfirmingCategory(true);
             return;
         }
 
-        const category = selectedCategory;
         onLocalUpdate?.(expense, { category });
         toast.success(`カテゴリを「${category}」に変更しました`);
         onClose();
@@ -193,6 +271,35 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                         <p className="text-xs text-gray-400">選択した明細1件の日付だけを変更します。</p>
                     </div>
 
+                    {/* Amount Editor */}
+                    <div className="space-y-2">
+                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">金額変更</label>
+                        <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">¥</span>
+                            <input
+                                type="number"
+                                inputMode="numeric"
+                                value={selectedAmount}
+                                onChange={(e) => setSelectedAmount(e.target.value)}
+                                className="w-full text-base p-3 pl-8 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white font-bold"
+                            />
+                        </div>
+                        <button
+                            onClick={handleUpdateAmount}
+                            disabled={isUpdatingAmount || selectedAmount === String(expense.amount)}
+                            className={clsx(
+                                "w-full py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2 transition-all active:scale-[0.98]",
+                                isUpdatingAmount || selectedAmount === String(expense.amount)
+                                    ? "bg-blue-300 dark:bg-blue-900/60"
+                                    : "bg-blue-600 hover:bg-blue-700"
+                            )}
+                        >
+                            <JapaneseYen size={18} />
+                            {isUpdatingAmount ? '更新中...' : '金額を保存'}
+                        </button>
+                        <p className="text-xs text-gray-400">選択した明細1件の金額だけを変更します。</p>
+                    </div>
+
                     {/* Category Selector */}
                     <div className="space-y-2">
                         <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">カテゴリ変更</label>
@@ -207,9 +314,32 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                                 ))}
                             </select>
                         </div>
+                        {/* Scope selector */}
+                        <div className="flex p-1 rounded-lg bg-gray-100 dark:bg-slate-800">
+                            <button
+                                onClick={() => { setCategoryScope('merchant'); setConfirmingCategory(false); }}
+                                className={clsx(
+                                    "flex-1 py-1.5 text-xs font-bold rounded-md transition-all",
+                                    categoryScope === 'merchant' ? "bg-white dark:bg-slate-600 text-gray-800 dark:text-white shadow-sm" : "text-gray-400"
+                                )}
+                            >
+                                この店舗すべて
+                            </button>
+                            <button
+                                onClick={() => { setCategoryScope('single'); setConfirmingCategory(false); }}
+                                className={clsx(
+                                    "flex-1 py-1.5 text-xs font-bold rounded-md transition-all",
+                                    categoryScope === 'single' ? "bg-white dark:bg-slate-600 text-gray-800 dark:text-white shadow-sm" : "text-gray-400"
+                                )}
+                            >
+                                この明細のみ
+                            </button>
+                        </div>
                         <p className="text-xs text-gray-400 flex items-start gap-1">
                             <AlertCircle size={12} className="mt-0.5 shrink-0" />
-                            変更すると、このお店の過去・未来の取引もすべてこのカテゴリに統一されます。
+                            {categoryScope === 'merchant'
+                                ? '変更すると、このお店の過去・未来の取引もすべてこのカテゴリに統一されます。'
+                                : 'この明細1件だけを変更します。自動分類ルールは変わりません。'}
                         </p>
                     </div>
 

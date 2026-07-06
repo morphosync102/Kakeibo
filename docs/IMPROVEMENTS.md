@@ -20,7 +20,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
   成功後 `clearCache(source)`。呼び出し側・`test/gas-*.test.mjs`・SPECIFICATION の API 契約表を同時更新。
 - GASデプロイ: **必要**(GAS 先行 → Vercel の順)。
 
-### 1-2. ExpenseDetailModal に金額編集 UI を追加
+### 1-2. ExpenseDetailModal に金額編集 UI を追加 ✅ 対応済み (2026-07-07)
 
 - 対象: `components/ExpenseDetailModal.tsx`(日付エディタと同じ構成で金額欄 + 保存ボタン)。
 - 依存: 1-1 が本番デプロイ済みであること。
@@ -32,7 +32,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
   インラインの削除ボタンはモーダル内の削除に置き換え。
 - GASデプロイ: 不要(1-2 と同時なら 1-1 に依存)。
 
-### 1-4. 「この1件だけ」のカテゴリ変更オプション
+### 1-4. 「この1件だけ」のカテゴリ変更オプション ✅ 対応済み (2026-07-07)
 
 - 症状: カテゴリ変更は常に「同一店舗の全明細(両source)+ Config の自動分類ルール」一括で、
   1件だけ変えたいケース(同じ店で用途が違う買い物など)に対応できない。
