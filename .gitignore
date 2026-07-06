@@ -41,3 +41,6 @@ yarn-error.log*
 next-env.d.ts
 
 /public/*
+
+# clasp (Apps Script CLI) - keep script id out of the repo
+.clasp.json

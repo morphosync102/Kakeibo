@@ -5,20 +5,25 @@ description: Use when changing or deploying the kakeibo Google Apps Script, spre
 
 # kakeibo GAS Automation
 
-Use this skill when editing the kakeibo Google Apps Script stored in `public/GAS.txt`.
+Use this skill when editing the kakeibo Google Apps Script stored in `gas/コード.js`.
 Read `docs/SPECIFICATION.md` before changing an API action, sheet schema, cache behavior,
 or deployment flow. That specification is the design source of truth.
 
 ## Required Workflow
 
-1. Update `public/GAS.txt`; never treat the deployed Apps Script editor as the only source.
+1. Update `gas/コード.js`; never treat the deployed Apps Script editor as the only source.
 2. Preserve `main` and `yahoo` source separation.
 3. Add or update a `test/gas-*.test.mjs` regression test.
 4. Clear the affected GAS cache after every successful write.
 5. Run `npm test`, `npm run lint`, and `npm run build`.
-6. Deploy the new Apps Script version before deploying a Web UI that calls a new action.
+6. Commit GAS changes separately from UI changes and push the GAS commit first.
+   GitHub Actions (`.github/workflows/deploy-gas.yml`) runs `clasp push` and deploys a
+   new version to the existing web app deployment (the URL stays stable). Confirm the
+   workflow succeeded before pushing UI changes that call a new action.
 
-Apps Script deployment and Vercel deployment are separate operations.
+Manual fallback: `npm run gas:push` / `npm run gas:deploy` (requires `npx clasp login`
+and a local `.clasp.json`; the script id is stored only in GitHub Secrets and local
+`.clasp.json`, never in the repository).
 
 ## Sources
 

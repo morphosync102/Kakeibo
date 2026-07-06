@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "test": "node --test",
-    "lint": "eslint"
+    "lint": "eslint",
+    "gas:push": "clasp push",
+    "gas:deploy": "clasp deploy"
   },
   "dependencies": {
     "clsx": "^2.1.1",

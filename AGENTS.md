@@ -12,11 +12,11 @@
   - `yahoo`: `Yahoo_Data` / `Yahoo_Config` / `Yahoo_Fixed`
 - Spreadsheet ID、LINE ID、アクセストークン、実取引情報、パスワードを
   リポジトリ、テスト、ドキュメントへ保存しない。
-- GASソースのリポジトリ上の正本は`public/GAS.txt`とする。
-- GAS API契約を変更した場合は、`public/GAS.txt`、呼び出し側、テスト、
+- GASソースのリポジトリ上の正本は`gas/コード.js`とする(claspで本番と同期)。
+- GAS API契約を変更した場合は、`gas/コード.js`、呼び出し側、テスト、
   `docs/SPECIFICATION.md`を同時に更新する。
-- GAS変更を本番へ出すときは、Apps Scriptの新バージョンを先にデプロイし、
-  その後にVercelをデプロイする。
+- GAS変更を本番へ出すときは、GAS変更のコミットを先に単独でpushし、
+  GitHub ActionsのGASデプロイ成功を確認してからUI変更をpushする。
 - 書き込み処理では、影響するGASキャッシュを必ず無効化する。
 - 新規追加または変更する明細1件の更新・削除では、MessageIdだけを一意キーとして信用しない。
   同じメールから複数明細が作られる可能性を考慮し、必要な識別項目を照合する。
@@ -36,5 +36,7 @@
 ## Deployment Boundaries
 
 - `git push`やVercelデプロイは、ユーザーの明示的な承認後に実施する。
-- Apps Script本番への貼り付け・新バージョンデプロイはVercelとは別作業である。
+- GASのデプロイは`main`へのpush(`gas/**`変更時)でGitHub Actionsが自動実行する
+  (`.github/workflows/deploy-gas.yml`、`clasp push` + 既存デプロイIDへの`clasp deploy`)。
 - Web UIを先にデプロイすると、新しいGASアクションが未提供で失敗する場合がある。
+  GAS変更とそれに依存するUI変更は別コミットに分け、GAS→UIの順にpushする。

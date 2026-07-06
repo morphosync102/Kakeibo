@@ -205,9 +205,12 @@ GASの変更には、VM sandboxを使う`test/gas-*.test.mjs`で回帰テスト�
 
 GAS API契約を変更する場合:
 
-1. `public/GAS.txt`をApps Scriptへ反映する。
-2. Apps Script Webアプリを新バージョンとしてデプロイする。
-3. WebアプリをVercel本番へデプロイする。
+1. `gas/コード.js`の変更をコミットし、`main`へpushする(UI変更とは別コミット)。
+2. GitHub Actions(`deploy-gas.yml`)が`clasp push`と既存デプロイIDへの
+   `clasp deploy`を自動実行するので、成功を確認する。
+3. その後、依存するWebアプリの変更をpushし、Vercel本番へデプロイする。
 4. 本番で対象操作を確認する。
 
 GAS変更がないWebのみの変更は、Vercelデプロイだけで完了します。
+手元からの緊急デプロイは`npm run gas:push`と`npm run gas:deploy`でも可能です
+(要`npx clasp login`と`.clasp.json`)。

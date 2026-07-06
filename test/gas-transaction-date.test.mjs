@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function loadGasWithRows(rows) {
-  const source = fs.readFileSync(join(__dirname, '../public/GAS.txt'), 'utf8');
+  const source = fs.readFileSync(join(__dirname, '../gas/コード.js'), 'utf8');
   const sheet = {
     getDataRange: () => ({ getValues: () => rows }),
     getRange: (row, column) => ({

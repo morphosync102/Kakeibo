@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function loadGasSandbox() {
-  const source = fs.readFileSync(join(__dirname, '../public/GAS.txt'), 'utf8');
+  const source = fs.readFileSync(join(__dirname, '../gas/コード.js'), 'utf8');
   const sandbox = {
     console,
     CacheService: { getScriptCache: () => ({ get: () => null, put: () => {}, removeAll: () => {} }) },

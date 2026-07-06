@@ -14,7 +14,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
 ### 1-1. GAS に `updateTransaction` action を新設(金額変更を可能にする)
 
 - 症状: 金額(および店舗名)を変更する手段がどの画面にもない。
-- 原因: GAS 側に単一明細の汎用更新 action が存在しない(`public/GAS.txt` の doPost 分岐参照)。
+- 原因: GAS 側に単一明細の汎用更新 action が存在しない(`gas/コード.js` の doPost 分岐参照)。
 - 方針: `updateTransactionDate` と同じ厳密照合方式(MessageId + 変更前日付 + 店舗名 + 変更前金額)で
   1件を特定し、金額・(任意で)店舗名・カテゴリを更新する action を追加。
   成功後 `clearCache(source)`。呼び出し側・`test/gas-*.test.mjs`・SPECIFICATION の API 契約表を同時更新。

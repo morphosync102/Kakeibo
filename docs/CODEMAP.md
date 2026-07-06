@@ -37,8 +37,10 @@
 | `lib/api.ts` | `Expense` 型と `fetchExpenses()`(`/api/expenses` を叩き日付降順ソート。エラー時は throw) |
 | `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `middleware.ts` | `kakeibo_session` Cookie による画面・API 保護。API は 401、画面は `/login?returnTo=` へ |
-| `public/GAS.txt` | **GAS ソースの正本**(約900行)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
-| `test/*.test.mjs` | `node --test`。`gas-*.test.mjs` は VM sandbox で GAS.txt を評価して回帰テスト |
+| `gas/コード.js` | **GAS ソースの正本**(約900行、clasp で本番と同期)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
+| `gas/appsscript.json` | GAS マニフェスト(タイムゾーン・Web アプリ設定) |
+| `.github/workflows/deploy-gas.yml` | main への push(`gas/**` 変更時)で clasp push + 既存デプロイ ID へ deploy |
+| `test/*.test.mjs` | `node --test`。`gas-*.test.mjs` は VM sandbox で `gas/コード.js` を評価して回帰テスト |
 
 ## データフロー(3層キャッシュ)
 
@@ -65,7 +67,7 @@ useExpenses (localStorage, source別)   ← 即表示 + マウント時バック
 
 金額変更は GAS 側に action が存在しない。方針は [IMPROVEMENTS.md](IMPROVEMENTS.md) の P1 を参照。
 
-## GAS.txt 関数マップ
+## gas/コード.js 関数マップ
 
 | 領域 | 主な関数 |
 | --- | --- |

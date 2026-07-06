@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Apps Script source: entry points are invoked by the GAS runtime
+    "gas/**",
   ]),
 ]);
 

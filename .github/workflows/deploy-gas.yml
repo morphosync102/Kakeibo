@@ -1,0 +1,36 @@
+name: Deploy GAS
+
+on:
+  push:
+    branches: [main]
+    paths: ['gas/**']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Restore clasp credentials
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          GAS_SCRIPT_ID: ${{ secrets.GAS_SCRIPT_ID }}
+        run: |
+          echo "$CLASPRC_JSON" > ~/.clasprc.json
+          printf '{"scriptId": "%s", "rootDir": "gas"}\n' "$GAS_SCRIPT_ID" > .clasp.json
+
+      - name: Push source to Apps Script
+        run: npx clasp push -f
+
+      - name: Deploy new version to the existing web app (URL stays stable)
+        env:
+          GAS_DEPLOYMENT_ID: ${{ secrets.GAS_DEPLOYMENT_ID }}
+        run: npx clasp deploy -i "$GAS_DEPLOYMENT_ID" -d "GitHub Actions ${GITHUB_SHA::7}"
