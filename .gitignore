@@ -40,7 +40,11 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# public assets: track only what the app references
 /public/*
+!/public/image.png
+!/public/psyduck.png
+!/public/yahoo-manifest.json
 
 # clasp (Apps Script CLI) - keep script id out of the repo
 .clasp.json
