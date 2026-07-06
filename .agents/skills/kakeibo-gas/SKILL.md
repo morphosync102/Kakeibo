@@ -1,11 +1,24 @@
 ---
 name: kakeibo-gas
-description: Project-specific guidance for the kakeibo Google Apps Script automation, spreadsheet schema, and monthly LINE reports.
+description: Use when changing or deploying the kakeibo Google Apps Script, spreadsheet schema, expense API actions, email imports, fixed costs, or monthly LINE reports.
 ---
 
 # kakeibo GAS Automation
 
 Use this skill when editing the kakeibo Google Apps Script stored in `public/GAS.txt`.
+Read `docs/SPECIFICATION.md` before changing an API action, sheet schema, cache behavior,
+or deployment flow. That specification is the design source of truth.
+
+## Required Workflow
+
+1. Update `public/GAS.txt`; never treat the deployed Apps Script editor as the only source.
+2. Preserve `main` and `yahoo` source separation.
+3. Add or update a `test/gas-*.test.mjs` regression test.
+4. Clear the affected GAS cache after every successful write.
+5. Run `npm test`, `npm run lint`, and `npm run build`.
+6. Deploy the new Apps Script version before deploying a Web UI that calls a new action.
+
+Apps Script deployment and Vercel deployment are separate operations.
 
 ## Sources
 
@@ -52,6 +65,25 @@ The spreadsheet ID is configured through the GAS Script Property `SHEET_ID`. Do 
 - G: Type
 
 For aggregation, treat `Type === "Income"` as income and all other rows as expenses. If `Category` is empty, use `未分類`.
+
+MessageId is not guaranteed to be unique because one email can produce multiple transaction
+rows. For new or changed single-row mutations, match the additional fields required by the API
+contract in `docs/SPECIFICATION.md`. Existing `deleteTransaction` is a documented limitation;
+when changing it, migrate the caller and GAS implementation to strict matching together.
+
+## API Actions
+
+- GET default: read transactions
+- GET `getFixedCosts`: read fixed costs
+- POST `addTransaction`
+- POST `deleteTransaction`
+- POST `updateTransactionDate`
+- POST `updateCategory`
+- POST `addFixedCost`
+- POST `deleteFixedCost`
+
+When adding or changing an action, update the caller, GAS implementation, tests, and
+`docs/SPECIFICATION.md` together.
 
 ## Monthly LINE Reports
 
@@ -109,3 +141,4 @@ Never store these values in the repository, project skills, tests, or documentat
 - LINE Channel Access Token
 - LINE userId / groupId actual values
 - Real transaction details
+- App password
