@@ -218,5 +218,7 @@ GAS API契約を変更する場合:
 4. 本番で対象操作を確認する。
 
 GAS変更がないWebのみの変更は、Vercelデプロイだけで完了します。
+VercelはGitHub連携ではなく手動CLIデプロイ運用です(`npx vercel --prod`)。
+pushしただけでは本番に反映されません。
 手元からの緊急デプロイは`npm run gas:push`と`npm run gas:deploy`でも可能です
 (要`npx clasp login`と`.clasp.json`)。

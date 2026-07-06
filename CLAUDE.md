@@ -42,7 +42,9 @@ npm run build  # next build
 - GAS ソースの正本は `gas/コード.js`(clasp で本番と同期)。GAS API 契約の変更は
   `gas/コード.js`・呼び出し側・テスト・`docs/SPECIFICATION.md` を同時に更新する。
 - デプロイ順序: GAS 変更のコミットを先に push(GitHub Actions が自動デプロイ)→
-  成功確認後に UI 変更を push(Vercel)。
+  成功確認後に UI 変更を push。
+- Vercel は GitHub 連携ではなく手動 CLI 運用(`npx vercel --prod`)。push だけでは
+  本番に反映されない。本番デプロイはユーザーの明示承認後に実行する。
 - 書き込み処理では影響する GAS キャッシュ(`clearCache`)と Next.js の `expenses` タグを必ず無効化する。
 - 明細1件の更新・削除で MessageId を唯一のキーとして信用しない(同一メールから複数明細が生成される)。
   `updateTransactionDate` と同様に日付・店舗名・金額も照合する。
