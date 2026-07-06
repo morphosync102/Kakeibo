@@ -4,17 +4,20 @@ import { revalidateTag } from 'next/cache';
 // This URL will be updated with the user's new deployment URL
 const GAS_API_URL = process.env.GAS_API_URL || '';
 
+const FIXED_COST_ACTIONS = ['getFixedCosts', 'addFixedCost', 'deleteFixedCost'];
+
 export async function GET(request: Request) {
     try {
         const { searchParams } = new URL(request.url);
         const query = searchParams.toString();
         const url = query ? `${GAS_API_URL}?${query}` : GAS_API_URL;
+        const isFixedCosts = searchParams.get('action') === 'getFixedCosts';
 
         const res = await fetch(url, {
             // Cache for 1 hour (3600 seconds)
             next: {
                 revalidate: 3600,
-                tags: ['expenses']
+                tags: [isFixedCosts ? 'fixedCosts' : 'expenses']
             },
             headers: { 'Content-Type': 'application/json' },
         });
@@ -39,8 +42,12 @@ export async function POST(request: Request) {
         if (!res.ok) throw new Error('Failed to post to GAS');
         const data = await res.json();
 
-        // Invalidate cache on successful update
-        revalidateTag('expenses', 'max');
+        // Invalidate the cache that the completed write affects
+        if (FIXED_COST_ACTIONS.includes(body.action)) {
+            revalidateTag('fixedCosts', 'max');
+        } else {
+            revalidateTag('expenses', 'max');
+        }
 
         return NextResponse.json(data);
     } catch {

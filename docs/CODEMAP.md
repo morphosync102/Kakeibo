@@ -23,8 +23,8 @@
 | ファイル | 責務 | 使用ページ |
 | --- | --- | --- |
 | `Dashboard.tsx` | 月カード横スワイプ、円グラフ、カテゴリ絞り込み、明細リスト。明細タップで `ExpenseDetailModal` を開く | `/`, `/yahoo` |
-| `ExpenseDetailModal.tsx` | **明細編集の中心**。日付変更(`updateTransactionDate`)、カテゴリ変更(`updateCategory`、店舗一括)、削除(`deleteTransaction`) | Dashboard のみ |
-| `CalendarView.tsx` | 月カレンダー + 日別明細。明細は**インライン削除のみ**(モーダルは開かない) | `/calendar`, `/yahoo/calendar` |
+| `ExpenseDetailModal.tsx` | **明細編集の中心**。日付変更(`updateTransactionDate`)、カテゴリ変更(`updateCategory`、店舗一括)、削除(`deleteTransaction`)。破壊的操作は2タップ確認、結果は sonner トースト | Dashboard / CalendarView |
+| `CalendarView.tsx` | 月カレンダー + 日別明細。明細タップで `ExpenseDetailModal` を開く。日別集計は `useMemo` の Map に前計算 | `/calendar`, `/yahoo/calendar` |
 | `ManageView.tsx` | 手動入力(`addTransaction`)と固定費 CRUD(`addFixedCost`/`deleteFixedCost`)。明細一覧は表示しない | `/manage`, `/yahoo/manage` |
 | `BottomNav.tsx` | 下部ナビゲーション | 全画面 |
 | `BodyBackgroundSetter.tsx` | body 背景色の設定 | yahoo layout |
@@ -33,8 +33,9 @@
 
 | ファイル | 責務 |
 | --- | --- |
-| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新 |
-| `lib/api.ts` | `Expense` 型と `fetchExpenses()`(`/api/expenses` を叩き日付降順ソート。**エラー時は `[]` を返す**) |
+| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新、`error` で失敗通知(失敗時もキャッシュ維持) |
+| `lib/api.ts` | `Expense` 型と `fetchExpenses()`(`/api/expenses` を叩き日付降順ソート。エラー時は throw) |
+| `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `middleware.ts` | `kakeibo_session` Cookie による画面・API 保護。API は 401、画面は `/login?returnTo=` へ |
 | `public/GAS.txt` | **GAS ソースの正本**(約900行)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
 | `test/*.test.mjs` | `node --test`。`gas-*.test.mjs` は VM sandbox で GAS.txt を評価して回帰テスト |
@@ -52,19 +53,17 @@ useExpenses (localStorage, source別)   ← 即表示 + マウント時バック
 ```
 
 書き込み系を追加・変更する場合、**3層すべての無効化経路**を確認すること。
-
-例外: 固定費一覧の取得(`ManageView.tsx` の `fetchFixedCosts`)は `t=${Date.now()}` を
-付けて Next.js キャッシュを毎回バイパスしている(改善対象、[IMPROVEMENTS.md](IMPROVEMENTS.md) 参照)。
+固定費は `fixedCosts` タグで別管理(GET でタグ付与、`addFixedCost` / `deleteFixedCost` の POST 後に revalidate)。
 
 ## 画面 × 明細編集操作の対応表(現状)
 
 | 画面 | 削除 | 日付変更 | カテゴリ変更 | 金額変更 |
 | --- | --- | --- | --- | --- |
 | ダッシュボード(明細タップ→モーダル) | ✓ | ✓ | ✓(同一店舗一括+Config更新のみ) | ✗ |
-| カレンダー(日別明細) | ✓(インラインボタンのみ) | ✗ | ✗ | ✗ |
+| カレンダー(明細タップ→同じモーダル) | ✓ | ✓ | ✓(同上) | ✗ |
 | 管理 | -(明細一覧なし) | - | - | - |
 
-金額変更は GAS 側に action が存在しない。統一方針は [IMPROVEMENTS.md](IMPROVEMENTS.md) の P1 を参照。
+金額変更は GAS 側に action が存在しない。方針は [IMPROVEMENTS.md](IMPROVEMENTS.md) の P1 を参照。
 
 ## GAS.txt 関数マップ
 

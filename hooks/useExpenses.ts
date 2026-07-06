@@ -5,11 +5,24 @@ import { fetchExpenses, Expense } from '@/lib/api';
 
 const STORAGE_KEY = 'kakeibo_expenses_cache';
 
+function isSameExpense(a: Expense, b: Expense) {
+    return a.id === b.id
+        && a.date === b.date
+        && a.merchant === b.merchant
+        && a.amount === b.amount;
+}
+
 export function useExpenses(source?: string) {
     const [expenses, setExpensesState] = useState<Expense[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
     const cacheKey = source ? `${STORAGE_KEY}_${source}` : STORAGE_KEY;
+
+    const persist = useCallback((data: Expense[]) => {
+        setExpensesState(data);
+        localStorage.setItem(cacheKey, JSON.stringify(data));
+    }, [cacheKey]);
 
     // Load from cache immediately on mount
     useEffect(() => {
@@ -28,14 +41,39 @@ export function useExpenses(source?: string) {
         setLoading(true); // Optional: show spinner if user manually triggered
         try {
             const data = await fetchExpenses(source);
-            setExpensesState(data);
-            localStorage.setItem(cacheKey, JSON.stringify(data));
+            persist(data);
+            setError(null);
         } catch (error) {
+            // Keep whatever is on screen (cache) instead of wiping it
             console.error('Failed to refresh data', error);
+            setError('データの取得に失敗しました');
         } finally {
             setLoading(false);
         }
-    }, [source, cacheKey]);
+    }, [source, persist]);
+
+    // Optimistic mutations: update local state (and cache) immediately,
+    // callers run refresh() in the background to reconcile with the server.
+    const removeLocal = useCallback((target: Expense) => {
+        setExpensesState(previous => {
+            const index = previous.findIndex(item => isSameExpense(item, target));
+            if (index === -1) return previous;
+            const next = [...previous.slice(0, index), ...previous.slice(index + 1)];
+            localStorage.setItem(cacheKey, JSON.stringify(next));
+            return next;
+        });
+    }, [cacheKey]);
+
+    const updateLocal = useCallback((target: Expense, changes: Partial<Expense>) => {
+        setExpensesState(previous => {
+            const index = previous.findIndex(item => isSameExpense(item, target));
+            if (index === -1) return previous;
+            const next = [...previous];
+            next[index] = { ...next[index], ...changes };
+            localStorage.setItem(cacheKey, JSON.stringify(next));
+            return next;
+        });
+    }, [cacheKey]);
 
     // Auto-fetch in background if cache exists, or fetch immediately if empty
     useEffect(() => {
@@ -45,11 +83,14 @@ export function useExpenses(source?: string) {
         } else {
             // Background update (silent refresh)
             fetchExpenses(source).then(data => {
-                setExpensesState(data);
-                localStorage.setItem(cacheKey, JSON.stringify(data));
-            }).catch(e => console.error(e));
+                persist(data);
+                setError(null);
+            }).catch(e => {
+                console.error(e);
+                setError('データの取得に失敗しました');
+            });
         }
-    }, [refresh, cacheKey, source]);
+    }, [refresh, cacheKey, source, persist]);
 
-    return { expenses, loading, refresh };
+    return { expenses, loading, error, refresh, removeLocal, updateLocal };
 }

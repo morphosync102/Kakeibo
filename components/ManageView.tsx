@@ -5,6 +5,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { clsx } from 'clsx';
 import { PlusCircle, RefreshCw, Check, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
+import { toast } from 'sonner';
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/lib/categories';
 
 interface ManageViewProps {
     source?: string;
@@ -23,8 +25,8 @@ interface FixedCost {
     category: string;
 }
 
-export default function ManageView({ source, isDarkMode }: ManageViewProps) {
-    const isYahoo = source === 'yahoo' || isDarkMode; // Simplify check
+export default function ManageView({ source, isDarkMode = false }: ManageViewProps) {
+    const isYahoo = source === 'yahoo';
 
     const [activeTab, setActiveTab] = useState<'entry' | 'fixed'>('entry');
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -37,13 +39,13 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
     });
 
     const categories: Categories = {
-        Expense: ['未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費', '医療費', '光熱費', 'その他', '固定費', '身だしなみ'],
-        Income: ['給料', '臨時収入', '賞与', 'その他']
+        Expense: EXPENSE_CATEGORIES,
+        Income: INCOME_CATEGORIES
     };
 
     const handleSubmit = async () => {
         if (!formData.amount) {
-            alert('金額を入力してください');
+            toast.error('金額を入力してください');
             return;
         }
 
@@ -64,22 +66,24 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
             });
 
             if (!res.ok) throw new Error('API Error');
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
 
             // Reset form
             setFormData(prev => ({ ...prev, merchant: '', amount: '' }));
-            alert('追加しました！');
+            toast.success('追加しました');
         } catch (e) {
-            alert('エラーが発生しました');
+            toast.error('追加に失敗しました');
             console.error(e);
         } finally {
             setIsSubmitting(false);
         }
     };
 
-    const bgColor = isYahoo ? 'bg-slate-950' : 'bg-gray-50';
-    const cardBg = isYahoo ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100';
-    const textColor = isYahoo ? 'text-gray-100' : 'text-gray-800';
-    const headerBg = isYahoo ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
+    const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-gray-50';
+    const cardBg = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100';
+    const textColor = isDarkMode ? 'text-gray-100' : 'text-gray-800';
+    const headerBg = isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
 
     return (
         <main className={clsx("min-h-screen pb-24 transition-colors", bgColor)} >
@@ -92,14 +96,14 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
 
             {/* Tabs */}
             < div className="px-4 py-4" >
-                <div className={clsx("flex p-1 rounded-xl border shadow-sm", isYahoo ? "bg-slate-900 border-slate-800" : "bg-white border-gray-200")}>
+                <div className={clsx("flex p-1 rounded-xl border shadow-sm", isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-gray-200")}>
                     <button
                         onClick={() => setActiveTab('entry')}
                         className={clsx(
                             "flex-1 py-2 text-sm font-medium rounded-lg transition-colors",
                             activeTab === 'entry'
                                 ? "bg-indigo-50 text-indigo-600"
-                                : (isYahoo ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
+                                : (isDarkMode ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
                         )}
                     >
                         手動入力
@@ -110,7 +114,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                             "flex-1 py-2 text-sm font-medium rounded-lg transition-colors",
                             activeTab === 'fixed'
                                 ? "bg-indigo-50 text-indigo-600"
-                                : (isYahoo ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
+                                : (isDarkMode ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
                         )}
                     >
                         固定費設定
@@ -125,14 +129,14 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                     <div className="space-y-6">
                         {/* Manual Entry Section */}
                         <section className={clsx("p-5 rounded-2xl shadow-sm border", cardBg)}>
-                            <div className={clsx("flex items-center gap-2 mb-5 font-bold border-b pb-3", textColor, isYahoo ? "border-slate-800" : "border-gray-100")}>
+                            <div className={clsx("flex items-center gap-2 mb-5 font-bold border-b pb-3", textColor, isDarkMode ? "border-slate-800" : "border-gray-100")}>
                                 <PlusCircle size={20} className="text-indigo-500" />
                                 <h2>{formData.type === 'Income' ? '収入の入力' : '支出の入力'}</h2>
                             </div>
 
                             <div className="space-y-4">
                                 {/* Type Toggle */}
-                                <div className={clsx("flex p-1 rounded-lg", isYahoo ? "bg-slate-800" : "bg-gray-100")}>
+                                <div className={clsx("flex p-1 rounded-lg", isDarkMode ? "bg-slate-800" : "bg-gray-100")}>
                                     <button
                                         onClick={() => setFormData({ ...formData, type: 'Expense', category: '食費' })}
                                         className={clsx("flex-1 py-2 text-xs font-bold rounded-md transition-all", formData.type === 'Expense' ? "bg-white text-gray-800 shadow-sm" : "text-gray-400")}
@@ -153,14 +157,14 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                                         value={formData.date}
                                         onChange={(e) => setFormData({ ...formData, date: e.target.value })}
                                         className={clsx("border rounded-lg p-3 text-sm flex-1 outline-none focus:ring-2 focus:ring-indigo-100",
-                                            isYahoo ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
+                                            isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
                                         )}
                                     />
                                     <select
                                         value={formData.category}
                                         onChange={(e) => setFormData({ ...formData, category: e.target.value })}
                                         className={clsx("flex-1 border rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-indigo-100",
-                                            isYahoo ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
+                                            isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
                                         )}
                                     >
                                         {(formData.type === 'Income' ? categories.Income : categories.Expense).map(c => (
@@ -175,7 +179,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                                     value={formData.merchant}
                                     onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
                                     className={clsx("w-full border rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-indigo-100",
-                                        isYahoo ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
+                                        isDarkMode ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
                                     )}
                                 />
 
@@ -187,7 +191,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
                                         value={formData.amount}
                                         onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                                         className={clsx("w-full border rounded-lg p-3 pl-8 text-sm outline-none focus:ring-2 focus:ring-indigo-100 font-bold",
-                                            isYahoo ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
+                                            isDarkMode ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
                                         )}
                                         inputMode="numeric"
                                     />
@@ -220,7 +224,7 @@ export default function ManageView({ source, isDarkMode }: ManageViewProps) {
 
                 {
                     activeTab === 'fixed' && (
-                        <FixedCostSection categories={categories} source={source} isDarkMode={isYahoo} />
+                        <FixedCostSection categories={categories} source={source} isDarkMode={isDarkMode} />
                     )
                 }
 
@@ -235,6 +239,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
     const [isLoading, setIsLoading] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
     const [showForm, setShowForm] = useState(false);
+    const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
 
     // New Item Form State
     const [newItem, setNewItem] = useState({
@@ -247,18 +252,19 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
 
     const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
-    // Initial Fetch
+    // Initial Fetch (served from the Next.js 'fixedCosts' tag cache,
+    // which POST writes revalidate — no cache-busting param needed)
     const fetchFixedCosts = useCallback(async () => {
         setIsLoading(true);
         try {
-            // Add timestamp to prevent caching and source
-            const url = `/api/expenses?action=getFixedCosts&t=${Date.now()}${source ? `&source=${source}` : ''}`;
+            const url = `/api/expenses?action=getFixedCosts${source ? `&source=${source}` : ''}`;
             const res = await fetch(url);
             if (!res.ok) throw new Error('Fetch failed');
             const data = await res.json();
             setFixedCosts(Array.isArray(data) ? data : []);
         } catch (e) {
             console.error(e);
+            toast.error('固定費の取得に失敗しました');
         } finally {
             setIsLoading(false);
         }
@@ -287,30 +293,40 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
             });
             setShowForm(false);
             setNewItem({ ...newItem, name: '', amount: '' });
+            toast.success('定期設定を追加しました');
             fetchFixedCosts(); // Refresh list
         } catch {
-            alert('エラーが発生しました');
+            toast.error('追加に失敗しました');
         } finally {
             setIsAdding(false);
         }
     };
 
-    const handleDelete = async (id: number) => {
-        if (!confirm('本当に削除しますか？')) return;
-        try {
-            await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'deleteFixedCost',
-                    id: id,
-                    source // Pass source
-                })
-            });
-            fetchFixedCosts(); // Refresh list
-        } catch {
-            alert('削除に失敗しました');
+    // Two-tap confirm, then optimistic removal reconciled in the background
+    const handleDelete = (item: FixedCost) => {
+        if (confirmingDeleteId !== item.id) {
+            setConfirmingDeleteId(item.id);
+            return;
         }
+        setConfirmingDeleteId(null);
+        const previous = fixedCosts;
+        setFixedCosts(previous.filter(f => f.id !== item.id));
+        toast.success('削除しました');
+
+        fetch('/api/expenses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'deleteFixedCost',
+                id: item.id,
+                source // Pass source
+            })
+        })
+            .then(() => fetchFixedCosts())
+            .catch(() => {
+                toast.error('削除に失敗しました');
+                setFixedCosts(previous);
+            });
     };
 
     const cardBg = isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-gray-100";
@@ -333,6 +349,12 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
                 </div>
 
                 <div className="space-y-3">
+                    {isLoading && fixedCosts.length === 0 && (
+                        [...Array(2)].map((_, i) => (
+                            <div key={i} className={clsx("h-12 rounded-xl animate-pulse", isDarkMode ? "bg-slate-800" : "bg-gray-100")} />
+                        ))
+                    )}
+
                     {fixedCosts.length === 0 && !isLoading && (
                         <div className="text-center text-gray-400 text-xs py-4">まだ設定がありません</div>
                     )}
@@ -354,10 +376,15 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
                                     <div className="text-[10px] text-gray-400">{item.type === 'Income' ? '収入' : '支出'}</div>
                                 </div>
                                 <button
-                                    onClick={() => handleDelete(item.id)}
-                                    className="text-gray-300 hover:text-red-400 px-2"
+                                    onClick={() => handleDelete(item)}
+                                    className={clsx(
+                                        "px-2 text-xs whitespace-nowrap transition-colors",
+                                        confirmingDeleteId === item.id
+                                            ? "text-red-500 font-bold"
+                                            : "text-gray-300 hover:text-red-400"
+                                    )}
                                 >
-                                    ×
+                                    {confirmingDeleteId === item.id ? '削除する?' : '×'}
                                 </button>
                             </div>
                         </div>

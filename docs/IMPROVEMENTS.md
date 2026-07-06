@@ -25,7 +25,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
 - 対象: `components/ExpenseDetailModal.tsx`(日付エディタと同じ構成で金額欄 + 保存ボタン)。
 - 依存: 1-1 が本番デプロイ済みであること。
 
-### 1-3. カレンダーの日別明細から詳細モーダルを開く
+### 1-3. カレンダーの日別明細から詳細モーダルを開く ✅ 対応済み (2026-07-07)
 
 - 症状: カレンダー(`components/CalendarView.tsx` の日別明細)は削除しかできない。
 - 方針: 明細タップで `ExpenseDetailModal` を開く(Dashboard と同じ `selectedExpense` パターンを再利用)。
@@ -53,7 +53,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
 根本原因は GAS Web App のレイテンシ(コールド時 1〜3 秒)+ 書き込み後キャッシュ無効化による
 コールドリード。GAS を残す前提では「GAS を待たせない UI」にするのが効果的。
 
-### 2-1. 固定費一覧のキャッシュバスター除去
+### 2-1. 固定費一覧のキャッシュバスター除去 ✅ 対応済み (2026-07-07)
 
 - 症状: 管理画面の固定費タブを開くたびに数秒待つ。
 - 原因: `components/ManageView.tsx` の `fetchFixedCosts` が `t=${Date.now()}` を付けるため
@@ -62,7 +62,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
   `addFixedCost` / `deleteFixedCost` の POST 成功後に `revalidateTag('fixedCosts')`。
 - GASデプロイ: 不要。**最も低リスクで効果が分かりやすい**。
 
-### 2-2. 書き込み操作の楽観的更新
+### 2-2. 書き込み操作の楽観的更新 ✅ 対応済み (2026-07-07)
 
 - 症状: 削除・日付変更・追加のたびに全明細を GAS から再取得し、完了まで待たされる。
 - 原因: 各ハンドラが成功後に `refresh()`(全件再取得)を呼ぶだけで、ローカル state を即時更新しない。
@@ -71,7 +71,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
   UI は即時反映 → バックグラウンドで再取得・失敗時ロールバック。
 - GASデプロイ: 不要。
 
-### 2-3. `alert()` / `confirm()` を非ブロッキング UI へ置換
+### 2-3. `alert()` / `confirm()` を非ブロッキング UI へ置換 ✅ 対応済み (2026-07-07, sonner)
 
 - 症状: 操作のたびにブラウザダイアログで全体がブロックされ、遅く感じる。
 - 対象: `ExpenseDetailModal.tsx`、`CalendarView.tsx`、`ManageView.tsx`。
@@ -86,24 +86,24 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
 
 ## P2 — コード品質
 
-### 3-1. カテゴリ定数の集約
+### 3-1. カテゴリ定数の集約 ✅ 対応済み (2026-07-07)
 
 - 症状: 支出カテゴリのリストが `Dashboard.tsx` / `ExpenseDetailModal.tsx` / `ManageView.tsx` に
   三重複(収入カテゴリは ManageView のみ)。カテゴリ追加時に同期漏れしやすい。
 - 方針: `lib/categories.ts` に集約して各コンポーネントから import。
 
-### 3-2. `fetchExpenses` のエラー握りつぶし
+### 3-2. `fetchExpenses` のエラー握りつぶし ✅ 対応済み (2026-07-07)
 
 - 症状: `lib/api.ts` がエラー時に `[]` を返すため、通信失敗が「データ0件」と区別できない。
   `useExpenses` のバックグラウンド更新経由で localStorage キャッシュが空配列で上書きされる恐れもある。
 - 方針: エラーは throw し、`useExpenses` 側で「キャッシュ維持 + エラー表示」に分岐。
 
-### 3-3. `isYahoo = source === 'yahoo' || isDarkMode` の解消
+### 3-3. `isYahoo` とテーマ判定の混線解消 ✅ 対応済み (2026-07-07)
 
 - 症状: `ManageView.tsx` が「ダークモード = yahoo」とみなしており、source 判定とテーマ判定が混線。
 - 方針: source とテーマを独立した prop として扱う(他コンポーネントと同じ形に揃える)。
 
-### 3-4. CalendarView の集計メモ化
+### 3-4. CalendarView の集計メモ化 ✅ 対応済み (2026-07-07)
 
 - 症状: 月間サマリーと 42 日分のセルが毎レンダーで `expenses` 全件を複数回 filter する。
 - 方針: 日別集計を `useMemo` で `Map<日付, {income, expense}>` に前計算。データ量が増えるまでは軽微。

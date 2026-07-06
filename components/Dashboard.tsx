@@ -6,18 +6,14 @@ import { format } from 'date-fns';
 import { RefreshCw, Calendar as CalendarIcon } from 'lucide-react';
 import { clsx } from 'clsx';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
+import { toast } from 'sonner';
 import BottomNav from '@/components/BottomNav';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import { Expense } from '@/lib/api';
+import { EXPENSE_CATEGORIES as CATEGORIES } from '@/lib/categories';
 
-// Lovely color palette for finance categories
 // Lovely color palette for finance categories
 const COLORS = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#14b8a6'];
-
-const CATEGORIES = [
-    '未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費',
-    '医療費', '光熱費', 'その他', '固定費', '身だしなみ'
-];
 
 interface DashboardProps {
     source?: string;
@@ -25,7 +21,7 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ source, isDarkMode = false }: DashboardProps) {
-    const { expenses, loading, refresh } = useExpenses(source);
+    const { expenses, loading, error, refresh, removeLocal, updateLocal } = useExpenses(source);
     const currentMonth = format(new Date(), 'yyyy/MM');
     const [selectedMonth, setSelectedMonth] = useState<string>(currentMonth);
     const [selectedCategoryState, setSelectedCategoryState] = useState<{ month: string; category: string | null }>(() => ({
@@ -121,6 +117,11 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
         }
         return data.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }, [currentViewData, selectedCategory]);
+
+    // Surface fetch failures without wiping the cached list
+    useEffect(() => {
+        if (error) toast.error(error);
+    }, [error]);
 
     // Center the current month on initial load.
     useEffect(() => {
@@ -401,6 +402,8 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                 expense={selectedExpense}
                 source={source}
                 onUpdate={refresh}
+                onLocalRemove={removeLocal}
+                onLocalUpdate={updateLocal}
             />
 
             <BottomNav />

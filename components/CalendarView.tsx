@@ -1,23 +1,45 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useExpenses } from '@/hooks/useExpenses';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, startOfWeek, endOfWeek, isSameMonth, isSameDay, isToday } from 'date-fns';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, startOfWeek, endOfWeek, isSameMonth, isToday } from 'date-fns';
 import { ja } from 'date-fns/locale';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import BottomNav from '@/components/BottomNav';
+import ExpenseDetailModal from './ExpenseDetailModal';
+import { Expense } from '@/lib/api';
 
 interface CalendarViewProps {
     source?: string;
     isDarkMode?: boolean;
 }
 
+interface DayTotals {
+    income: number;
+    expense: number;
+    items: Expense[];
+}
+
+// Normalizes an expense date string to the calendar cell key
+function toDayKey(date: string) {
+    const parsed = new Date(date);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return format(parsed, 'yyyy/MM/dd');
+}
+
 export default function CalendarView({ source, isDarkMode = false }: CalendarViewProps) {
-    const { expenses, refresh } = useExpenses(source);
+    const { expenses, loading, error, refresh, removeLocal, updateLocal } = useExpenses(source);
     const [currentDate, setCurrentDate] = useState(new Date());
     const [direction, setDirection] = useState(0);
+    const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
+
+    // Surface fetch failures without wiping the cached list
+    useEffect(() => {
+        if (error) toast.error(error);
+    }, [error]);
 
     // Theme Colors
     const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-white';
@@ -34,6 +56,42 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
     const endDate = endOfWeek(monthEnd);
 
     const calendarDays = eachDayOfInterval({ start: startDate, end: endDate });
+
+    // Pre-aggregate per-day totals in one pass instead of filtering per cell
+    const dayTotals = useMemo(() => {
+        const map = new Map<string, DayTotals>();
+        expenses.forEach(item => {
+            const key = toDayKey(item.date);
+            if (!key) return;
+            let totals = map.get(key);
+            if (!totals) {
+                totals = { income: 0, expense: 0, items: [] };
+                map.set(key, totals);
+            }
+            if (item.type === 'Income') {
+                totals.income += item.amount;
+            } else {
+                totals.expense += item.amount;
+            }
+            totals.items.push(item);
+        });
+        return map;
+    }, [expenses]);
+
+    const monthlySummary = useMemo(() => {
+        const monthKey = format(currentDate, 'yyyy/MM');
+        let income = 0;
+        let expense = 0;
+        dayTotals.forEach((totals, key) => {
+            if (key.startsWith(monthKey)) {
+                income += totals.income;
+                expense += totals.expense;
+            }
+        });
+        return { income, expense, balance: income - expense };
+    }, [dayTotals, currentDate]);
+
+    const selectedDayExpenses = dayTotals.get(format(currentDate, 'yyyy/MM/dd'))?.items ?? [];
 
     const nextMonth = () => {
         setDirection(1);
@@ -128,31 +186,20 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                             <div className={clsx("text-center flex-1 border-r", isDarkMode ? "border-slate-800" : "border-gray-200")}>
                                 <div className="text-[10px] text-gray-400">収入</div>
                                 <div className={clsx("font-bold", isDarkMode ? "text-emerald-400" : "text-emerald-600")}>
-                                    ¥{expenses
-                                        .filter(item => isSameMonth(new Date(item.date), currentDate) && item.type === 'Income')
-                                        .reduce((sum, i) => sum + i.amount, 0).toLocaleString()}
+                                    ¥{monthlySummary.income.toLocaleString()}
                                 </div>
                             </div>
                             <div className={clsx("text-center flex-1 border-r", isDarkMode ? "border-slate-800" : "border-gray-200")}>
                                 <div className="text-[10px] text-gray-400">支出</div>
                                 <div className={clsx("font-bold", isDarkMode ? "text-gray-200" : "text-gray-700")}>
-                                    ¥{expenses
-                                        .filter(item => isSameMonth(new Date(item.date), currentDate) && item.type !== 'Income')
-                                        .reduce((sum, i) => sum + i.amount, 0).toLocaleString()}
+                                    ¥{monthlySummary.expense.toLocaleString()}
                                 </div>
                             </div>
                             <div className="text-center flex-1">
                                 <div className="text-[10px] text-gray-400">収支</div>
-                                {(() => {
-                                    const inc = expenses.filter(i => isSameMonth(new Date(i.date), currentDate) && i.type === 'Income').reduce((s, i) => s + i.amount, 0);
-                                    const exp = expenses.filter(i => isSameMonth(new Date(i.date), currentDate) && i.type !== 'Income').reduce((s, i) => s + i.amount, 0);
-                                    const bal = inc - exp;
-                                    return (
-                                        <div className={clsx("font-bold", bal >= 0 ? (isDarkMode ? "text-indigo-400" : "text-indigo-600") : "text-red-500")}>
-                                            {bal.toLocaleString()}
-                                        </div>
-                                    );
-                                })()}
+                                <div className={clsx("font-bold", monthlySummary.balance >= 0 ? (isDarkMode ? "text-indigo-400" : "text-indigo-600") : "text-red-500")}>
+                                    {monthlySummary.balance.toLocaleString()}
+                                </div>
                             </div>
                         </div>
                     </header>
@@ -169,14 +216,13 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                     {/* Calendar Grid */}
                     <div className="grid grid-cols-7 gap-1 px-2 pb-2">
                         {calendarDays.map((day) => {
-                            // Separate calculations
-                            const dayExpenses = expenses.filter(item => isSameDay(new Date(item.date), day));
-                            const incomeSum = dayExpenses.filter(i => i.type === 'Income').reduce((s, i) => s + i.amount, 0);
-                            const expenseSum = dayExpenses.filter(i => i.type !== 'Income').reduce((s, i) => s + i.amount, 0);
+                            const totals = dayTotals.get(format(day, 'yyyy/MM/dd'));
+                            const incomeSum = totals?.income ?? 0;
+                            const expenseSum = totals?.expense ?? 0;
 
                             const isCurrentMonth = isSameMonth(day, monthStart);
                             const isTodayDate = isToday(day);
-                            const isSelected = isSameDay(day, currentDate);
+                            const isSelected = format(day, 'yyyy/MM/dd') === format(currentDate, 'yyyy/MM/dd');
 
                             return (
                                 <div
@@ -231,13 +277,19 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                             <span>{format(currentDate, 'M月d日 (EEE)', { locale: ja })} の明細</span>
                         </h2>
 
-                        <div className="space-y-3">
-                            {expenses
-                                .filter(item => isSameDay(new Date(item.date), currentDate))
-                                .map((item, index) => (
+                        {loading && expenses.length === 0 ? (
+                            <div className="space-y-3">
+                                {[...Array(3)].map((_, i) => (
+                                    <div key={i} className={clsx("h-16 rounded-xl animate-pulse", isDarkMode ? "bg-slate-900" : "bg-gray-100")} />
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {selectedDayExpenses.map((item, index) => (
                                     <div
                                         key={`${item.id}-${index}`}
-                                        className={clsx("p-4 rounded-xl shadow-sm border flex justify-between items-center group relative overflow-hidden", cardBg)}
+                                        onClick={() => setSelectedExpense(item)}
+                                        className={clsx("p-4 rounded-xl shadow-sm border flex justify-between items-center cursor-pointer transition-transform active:scale-[0.99]", cardBg)}
                                     >
                                         <div className="flex-1 min-w-0 mr-2">
                                             <div className={clsx("font-medium truncate", textColor)}>{item.merchant}</div>
@@ -250,49 +302,38 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                                 {item.category || '未分類'}
                                             </span>
                                         </div>
-                                        <div className="flex items-center gap-3 shrink-0">
-                                            <div className={clsx(
-                                                "text-lg font-bold whitespace-nowrap",
-                                                item.type === 'Income'
-                                                    ? (isDarkMode ? "text-emerald-400" : "text-emerald-600")
-                                                    : (isDarkMode ? "text-gray-100" : "text-gray-900")
-                                            )}>
-                                                {item.type === 'Income' ? '+' : ''}¥{item.amount.toLocaleString()}
-                                            </div>
-                                            {/* Delete Button */}
-                                            <button
-                                                onClick={async (e) => {
-                                                    e.stopPropagation();
-                                                    if (!confirm('この明細を削除しますか？')) return;
-                                                    try {
-                                                        await fetch('/api/expenses', {
-                                                            method: 'POST',
-                                                            headers: { 'Content-Type': 'application/json' },
-                                                            body: JSON.stringify({ action: 'deleteTransaction', id: item.id, source }) // Pass source
-                                                        });
-                                                        alert('削除しました');
-                                                        refresh();
-                                                    } catch {
-                                                        alert('削除に失敗しました');
-                                                    }
-                                                }}
-                                                className="text-xs text-red-300 hover:text-red-500 px-2 py-1 whitespace-nowrap"
-                                            >
-                                                削除
-                                            </button>
+                                        <div className={clsx(
+                                            "text-lg font-bold whitespace-nowrap shrink-0",
+                                            item.type === 'Income'
+                                                ? (isDarkMode ? "text-emerald-400" : "text-emerald-600")
+                                                : (isDarkMode ? "text-gray-100" : "text-gray-900")
+                                        )}>
+                                            {item.type === 'Income' ? '+' : ''}¥{item.amount.toLocaleString()}
                                         </div>
                                     </div>
                                 ))}
 
-                            {expenses.filter(item => isSameDay(new Date(item.date), currentDate)).length === 0 && (
-                                <div className={clsx("text-center py-8 text-xs border border-dashed rounded-xl", isDarkMode ? "border-slate-800 text-gray-500" : "border-gray-200 text-gray-400")}>
-                                    この日の支出はありません
-                                </div>
-                            )}
-                        </div>
+                                {selectedDayExpenses.length === 0 && (
+                                    <div className={clsx("text-center py-8 text-xs border border-dashed rounded-xl", isDarkMode ? "border-slate-800 text-gray-500" : "border-gray-200 text-gray-400")}>
+                                        この日の支出はありません
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </motion.div>
             </AnimatePresence>
+
+            <ExpenseDetailModal
+                isOpen={!!selectedExpense}
+                onClose={() => setSelectedExpense(null)}
+                expense={selectedExpense}
+                source={source}
+                onUpdate={refresh}
+                onLocalRemove={removeLocal}
+                onLocalUpdate={updateLocal}
+            />
+
             <BottomNav />
         </main>
     );

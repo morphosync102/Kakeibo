@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
+import { toast } from 'sonner';
 import { X, Trash2, Save, AlertCircle, CalendarDays } from 'lucide-react';
 import { Expense } from '@/lib/api';
+import { EXPENSE_CATEGORIES } from '@/lib/categories';
 
 interface ExpenseDetailModalProps {
     isOpen: boolean;
@@ -9,38 +11,38 @@ interface ExpenseDetailModalProps {
     expense: Expense | null;
     source?: string;
     onUpdate: () => void; // Callback to refresh data
+    onLocalRemove?: (expense: Expense) => void; // Optimistic removal
+    onLocalUpdate?: (expense: Expense, changes: Partial<Expense>) => void; // Optimistic update
 }
-
-const CATEGORIES = [
-    '未分類', '食費', 'カフェ', '交通費', '音ゲー', '日用品', '交際費',
-    '医療費', '光熱費', 'その他', '固定費', '身だしなみ'
-];
 
 function toDateInputValue(date: string) {
     return date.replace(/\//g, '-').slice(0, 10);
 }
 
-export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 'main', onUpdate }: ExpenseDetailModalProps) {
+export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 'main', onUpdate, onLocalRemove, onLocalUpdate }: ExpenseDetailModalProps) {
     const [selectedCategory, setSelectedCategory] = useState(expense?.category || '');
     const [selectedDate, setSelectedDate] = useState(expense ? toDateInputValue(expense.date) : '');
-    const [isUpdating, setIsUpdating] = useState(false);
     const [isUpdatingDate, setIsUpdatingDate] = useState(false);
-    const [isDeleting, setIsDeleting] = useState(false);
+    const [confirmingCategory, setConfirmingCategory] = useState(false);
+    const [confirmingDelete, setConfirmingDelete] = useState(false);
 
     useEffect(() => {
         if (!isOpen || !expense) return;
         setSelectedCategory(expense.category || '未分類');
         setSelectedDate(toDateInputValue(expense.date));
+        setConfirmingCategory(false);
+        setConfirmingDelete(false);
     }, [isOpen, expense]);
 
     if (!isOpen || !expense) return null;
 
     const handleUpdateDate = async () => {
         if (!selectedDate) {
-            alert('日付を入力してください');
+            toast.error('日付を入力してください');
             return;
         }
 
+        const newDate = selectedDate.replace(/-/g, '/');
         setIsUpdatingDate(true);
         try {
             const res = await fetch('/api/expenses', {
@@ -53,80 +55,95 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                     currentDate: expense.date,
                     merchant: expense.merchant,
                     amount: expense.amount,
-                    date: selectedDate.replace(/-/g, '/')
+                    date: newDate
                 }),
             });
             const data = await res.json();
             if (data.success) {
-                alert('日付を更新しました');
+                toast.success('日付を更新しました');
+                onLocalUpdate?.(expense, { date: newDate });
                 onUpdate();
                 onClose();
             } else {
-                alert('更新に失敗しました: ' + (data.error || 'Unknown error'));
+                toast.error('更新に失敗しました: ' + (data.error || 'Unknown error'));
             }
         } catch {
-            alert('エラーが発生しました');
+            toast.error('エラーが発生しました');
         } finally {
             setIsUpdatingDate(false);
         }
     };
 
-    const handleUpdateCategory = async () => {
-        if (!confirm(`「${expense.merchant}」のカテゴリを「${selectedCategory}」に変更しますか？\n※過去の履歴もすべて変更され、今後の自動分類設定も更新されます。`)) return;
-
-        setIsUpdating(true);
-        try {
-            const res = await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'updateCategory',
-                    source: source,
-                    merchant: expense.merchant,
-                    category: selectedCategory
-                }),
-            });
-            const data = await res.json();
-            if (data.success) {
-                alert('カテゴリを更新しました');
-                onUpdate();
-                onClose();
-            } else {
-                alert('更新に失敗しました: ' + (data.error || 'Unknown error'));
-            }
-        } catch {
-            alert('エラーが発生しました');
-        } finally {
-            setIsUpdating(false);
+    // Optimistic: apply locally and close right away, reconcile in the background
+    const handleUpdateCategory = () => {
+        if (!confirmingCategory) {
+            setConfirmingCategory(true);
+            return;
         }
+
+        const category = selectedCategory;
+        onLocalUpdate?.(expense, { category });
+        toast.success(`カテゴリを「${category}」に変更しました`);
+        onClose();
+
+        fetch('/api/expenses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'updateCategory',
+                source: source,
+                merchant: expense.merchant,
+                category
+            }),
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    toast.error('カテゴリの更新に失敗しました: ' + (data.error || 'Unknown error'));
+                }
+                onUpdate();
+            })
+            .catch(() => {
+                toast.error('カテゴリの更新に失敗しました');
+                onUpdate();
+            });
     };
 
-    const handleDelete = async () => {
-        if (!confirm('本当にこの明細を削除しますか？')) return;
-
-        setIsDeleting(true);
-        try {
-            const res = await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'deleteTransaction',
-                    source: source,
-                    id: expense.id
-                }),
-            });
-            const data = await res.json();
-            if (data.success) {
-                onUpdate();
-                onClose();
-            } else {
-                alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
-            }
-        } catch {
-            alert('エラーが発生しました');
-        } finally {
-            setIsDeleting(false);
+    // Optimistic: remove locally and close right away, reconcile in the background
+    const handleDelete = () => {
+        if (!confirmingDelete) {
+            setConfirmingDelete(true);
+            return;
         }
+
+        onLocalRemove?.(expense);
+        toast.success('削除しました');
+        onClose();
+
+        fetch('/api/expenses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'deleteTransaction',
+                source: source,
+                id: expense.id,
+                // Extra fields for strict row matching (older GAS ignores them)
+                date: expense.date,
+                merchant: expense.merchant,
+                amount: expense.amount
+            }),
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    toast.error('削除に失敗しました: ' + (data.error || 'Unknown error'));
+                    onUpdate();
+                }
+            })
+            .catch(() => {
+                toast.error('削除に失敗しました');
+                onUpdate();
+            });
     };
 
     return (
@@ -182,14 +199,13 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                         <div className="relative">
                             <select
                                 value={selectedCategory}
-                                onChange={(e) => setSelectedCategory(e.target.value)}
+                                onChange={(e) => { setSelectedCategory(e.target.value); setConfirmingCategory(false); }}
                                 className="w-full text-base p-3 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
                             >
-                                {CATEGORIES.map(cat => (
+                                {EXPENSE_CATEGORIES.map(cat => (
                                     <option key={cat} value={cat}>{cat}</option>
                                 ))}
                             </select>
-                            {/* Chevron down icon could go here via CSS or absolute SVG */}
                         </div>
                         <p className="text-xs text-gray-400 flex items-start gap-1">
                             <AlertCircle size={12} className="mt-0.5 shrink-0" />
@@ -201,23 +217,28 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                     <div className="space-y-3 pt-2">
                         <button
                             onClick={handleUpdateCategory}
-                            disabled={isUpdating}
                             className={clsx(
                                 "w-full py-3.5 rounded-xl font-bold text-white flex items-center justify-center gap-2 transition-all active:scale-[0.98]",
-                                isUpdating ? "bg-blue-400" : "bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-500/20"
+                                confirmingCategory
+                                    ? "bg-amber-500 hover:bg-amber-600 shadow-lg shadow-amber-500/20"
+                                    : "bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-500/20"
                             )}
                         >
                             <Save size={18} />
-                            {isUpdating ? '更新中...' : 'カテゴリ設定を保存'}
+                            {confirmingCategory ? 'もう一度タップで店舗全体に適用' : 'カテゴリ設定を保存'}
                         </button>
 
                         <button
                             onClick={handleDelete}
-                            disabled={isDeleting}
-                            className="w-full py-3.5 rounded-xl font-bold text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-900/20 dark:hover:bg-red-900/30 flex items-center justify-center gap-2 transition-colors"
+                            className={clsx(
+                                "w-full py-3.5 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors",
+                                confirmingDelete
+                                    ? "bg-red-600 hover:bg-red-700 text-white"
+                                    : "text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-900/20 dark:hover:bg-red-900/30"
+                            )}
                         >
                             <Trash2 size={18} />
-                            {isDeleting ? '削除中...' : 'この明細を削除'}
+                            {confirmingDelete ? 'もう一度タップで削除' : 'この明細を削除'}
                         </button>
                     </div>
                 </div>
