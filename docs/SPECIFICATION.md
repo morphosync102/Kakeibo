@@ -119,21 +119,21 @@ Next.jsは`GAS_API_URL`へリクエストを転送します。
 | action | 更新範囲 | 主な入力 |
 | --- | --- | --- |
 | `addTransaction` | 対象sourceへ明細1件追加 | date, merchant, amount, category, type |
-| `deleteTransaction` | 対象sourceでMessageIdが最初に一致した明細1件削除 | id |
+| `deleteTransaction` | 対象sourceの明細1件削除。date/merchant/amountを渡すと厳密照合、id のみなら旧来の先頭一致 | id, [date, merchant, amount] |
 | `updateTransactionDate` | 対象sourceの厳密一致明細1件の日付更新 | id, currentDate, merchant, amount, date |
+| `updateTransaction` | 対象sourceの厳密一致明細1件の金額・店舗名・カテゴリ更新(いずれか1つ以上) | id, currentDate, currentMerchant, currentAmount, [amount, merchant, category] |
 | `updateCategory` | 両sourceの同一店舗カテゴリとConfig更新 | merchant, category |
 | `addFixedCost` | 対象sourceへ固定費1件追加 | type, name, amount, day, category |
 | `deleteFixedCost` | 対象sourceの固定費1件削除 | id |
 
 GASはJSONで`{ success: true, ... }`または`{ error: "..." }`を返します。
-Next.js POSTプロキシは完了後に`expenses`タグを再検証します。
+Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ以外は`expenses`タグを
+完了後に再検証します。
 
 ### 既知制約
 
-- `deleteTransaction`はMessageIdのみで先頭一致行を削除します。同一メールから複数明細が
-  生成された場合、意図した行を一意に選べない可能性があります。
-- 新規の明細1件更新処理ではこの方式を使用せず、`updateTransactionDate`と同様に
-  追加項目を照合します。削除処理を改修する場合も厳密照合へ移行します。
+- `deleteTransaction`はid(MessageId)のみで呼ばれた場合に限り、旧クライアント互換として
+  先頭一致行を削除します。現行UIは常にdate/merchant/amountを送り厳密照合します。
 
 ## 5. 自動処理
 

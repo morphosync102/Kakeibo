@@ -207,17 +207,85 @@ function doPost(e) {
       const data = sheet.getDataRange().getValues();
       const targetId = params.id;
 
+      // Strict matching when the caller provides identifying fields.
+      // MessageId alone is not unique (one email can create multiple rows).
+      // Older clients that send only the id keep the legacy first-match behavior.
+      const hasStrictFields =
+        params.date !== undefined &&
+        params.merchant !== undefined &&
+        params.amount !== undefined;
+      const targetDate = hasStrictFields ? normalizeTransactionDate(params.date) : null;
+      if (hasStrictFields && !targetDate) return responseJSON({error: 'Invalid transaction date'});
+
       let found = false;
       for (let i = 1; i < data.length; i++) {
-        if (String(data[i][4]) === String(targetId)) {
-          sheet.deleteRow(i + 1);
+        if (String(data[i][4]) !== String(targetId)) continue;
+        if (hasStrictFields) {
+          const matches =
+            normalizeTransactionDate(data[i][0]) === targetDate &&
+            String(data[i][1]) === String(params.merchant) &&
+            Number(data[i][2]) === Number(params.amount);
+          if (!matches) continue;
+        }
+        sheet.deleteRow(i + 1);
+        found = true;
+        break;
+      }
+
+      if (found) {
+        result = {success: true, message: 'Deleted'};
+        shouldClearCache = true;
+      } else {
+        result = {error: 'Transaction not found'};
+      }
+    }
+
+    else if (action === 'updateTransaction') {
+      const sheet = ss.getSheetByName(sheets.data);
+      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+
+      const currentDate = normalizeTransactionDate(params.currentDate);
+      if (!currentDate) return responseJSON({error: 'Invalid current transaction date'});
+
+      // New values are optional; identifying fields (id, currentDate,
+      // currentMerchant, currentAmount) follow the updateTransactionDate contract.
+      const updates = {};
+      if (params.amount !== undefined) {
+        const amount = Number(params.amount);
+        if (!isFinite(amount) || amount <= 0) return responseJSON({error: 'Invalid amount'});
+        updates.amount = amount;
+      }
+      if (params.merchant !== undefined) {
+        const merchant = String(params.merchant).trim();
+        if (!merchant) return responseJSON({error: 'Invalid merchant'});
+        updates.merchant = merchant;
+      }
+      if (params.category !== undefined) {
+        updates.category = String(params.category);
+      }
+      if (Object.keys(updates).length === 0) return responseJSON({error: 'No fields to update'});
+
+      const data = sheet.getDataRange().getValues();
+      let found = false;
+
+      for (let i = 1; i < data.length; i++) {
+        const matches =
+          String(data[i][4]) === String(params.id) &&
+          normalizeTransactionDate(data[i][0]) === currentDate &&
+          String(data[i][1]) === String(params.currentMerchant) &&
+          Number(data[i][2]) === Number(params.currentAmount);
+
+        if (matches) {
+          if (updates.merchant !== undefined) sheet.getRange(i + 1, 2).setValue(updates.merchant);
+          if (updates.amount !== undefined) sheet.getRange(i + 1, 3).setValue(updates.amount);
+          if (updates.category !== undefined) sheet.getRange(i + 1, 4).setValue(updates.category);
           found = true;
           break;
         }
       }
 
       if (found) {
-        result = {success: true, message: 'Deleted'};
+        result = {success: true, message: 'Updated transaction'};
         shouldClearCache = true;
       } else {
         result = {error: 'Transaction not found'};

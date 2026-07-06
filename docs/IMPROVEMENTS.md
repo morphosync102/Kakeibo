@@ -11,7 +11,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
 現状の対応表は [CODEMAP.md](CODEMAP.md) を参照。ゴールは
 「**明細が見えるすべての画面で、タップ → 同じ詳細モーダル → 日付・カテゴリ・金額の変更と削除ができる**」こと。
 
-### 1-1. GAS に `updateTransaction` action を新設(金額変更を可能にする)
+### 1-1. GAS に `updateTransaction` action を新設(金額変更を可能にする) ✅ 対応済み (2026-07-07)
 
 - 症状: 金額(および店舗名)を変更する手段がどの画面にもない。
 - 原因: GAS 側に単一明細の汎用更新 action が存在しない(`gas/コード.js` の doPost 分岐参照)。
@@ -40,7 +40,7 @@ GAS 変更を伴う場合は [.agents/skills/kakeibo-gas/SKILL.md](../.agents/sk
   「この明細のみ」は 1-1 の `updateTransaction`(category のみ更新)を利用。
 - GASデプロイ: 1-1 に含まれる。
 
-### 1-5. `deleteTransaction` を厳密照合へ移行(既知制約の解消)
+### 1-5. `deleteTransaction` を厳密照合へ移行(既知制約の解消) ✅ 対応済み (2026-07-07, id のみは旧クライアント互換で先頭一致)
 
 - 症状: MessageId の先頭一致で1件削除するため、同一メール由来の複数明細がある場合に
   意図しない行を消す可能性がある(AGENTS.md / SPECIFICATION.md 記載の既知制約)。

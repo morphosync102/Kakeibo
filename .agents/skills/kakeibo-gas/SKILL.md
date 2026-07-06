@@ -72,17 +72,18 @@ The spreadsheet ID is configured through the GAS Script Property `SHEET_ID`. Do 
 For aggregation, treat `Type === "Income"` as income and all other rows as expenses. If `Category` is empty, use `未分類`.
 
 MessageId is not guaranteed to be unique because one email can produce multiple transaction
-rows. For new or changed single-row mutations, match the additional fields required by the API
-contract in `docs/SPECIFICATION.md`. Existing `deleteTransaction` is a documented limitation;
-when changing it, migrate the caller and GAS implementation to strict matching together.
+rows. Single-row mutations (`updateTransactionDate`, `updateTransaction`, `deleteTransaction`)
+therefore match date, merchant, and amount in addition to the id. `deleteTransaction` keeps a
+legacy id-only first-match fallback for old clients; new callers must send the strict fields.
 
 ## API Actions
 
 - GET default: read transactions
 - GET `getFixedCosts`: read fixed costs
 - POST `addTransaction`
-- POST `deleteTransaction`
+- POST `deleteTransaction` (strict match with date/merchant/amount; id-only falls back to legacy first match)
 - POST `updateTransactionDate`
+- POST `updateTransaction` (strict match; updates amount/merchant/category on one row)
 - POST `updateCategory`
 - POST `addFixedCost`
 - POST `deleteFixedCost`

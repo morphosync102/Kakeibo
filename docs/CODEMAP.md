@@ -73,7 +73,7 @@ useExpenses (localStorage, source別)   ← 即表示 + マウント時バック
 | --- | --- |
 | エントリ | `doGet`(既定: 明細一覧 / `getFixedCosts`)、`doPost`(action分岐)、`responseJSON` |
 | キャッシュ | `getCacheKey`、`clearCache(source)`、`getExpensesWithCache`、`getFixedCostsWithCache` |
-| 書き込みaction | `addTransaction` / `deleteTransaction`(MessageId先頭一致・既知制約)/ `updateTransactionDate`(厳密照合)/ `updateCategory` / `addFixedCost` / `deleteFixedCost` |
+| 書き込みaction | `addTransaction` / `deleteTransaction`(date/merchant/amount指定で厳密照合、idのみは旧互換の先頭一致)/ `updateTransactionDate`(厳密照合)/ `updateTransaction`(厳密照合で金額・店舗名・カテゴリ更新)/ `updateCategory` / `addFixedCost` / `deleteFixedCost` |
 | メール取込 | `runEmailExtraction` → `extractRakutenEmails` / `extractOliveEmails` / `extractJcbEmails` + 各 `parse*Body`、`determineCategory`、`getExistingMessageIds` |
 | 固定費 | `processFixedCosts`(日次トリガー)→ `processFixedCostsForSource` |
 | 月次LINEレポート | `sendMonthlyKakeiboReports`(毎月10日トリガー)→ `sendMonthlyKakeiboReportForSource`、`buildMonthlyKakeiboReportText`、`pushLineTextMessage`、`testSend*` 各種 |
