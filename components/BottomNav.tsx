@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useSearchParams } from 'next/navigation';
-import { Home, Calendar as CalendarIcon, Settings } from 'lucide-react';
+import { Home, ChartNoAxesCombined, Calendar as CalendarIcon, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Suspense } from 'react';
 
@@ -19,6 +19,12 @@ function BottomNavContent() {
             href: isYahoo ? '/yahoo' : '/',
             activeMatch: (p: string) => isYahoo ? p === '/yahoo' : p === '/',
             icon: Home
+        },
+        {
+            name: '統計',
+            href: isYahoo ? '/yahoo/statistics' : '/statistics',
+            activeMatch: (p: string) => isYahoo ? p === '/yahoo/statistics' : p === '/statistics',
+            icon: ChartNoAxesCombined
         },
         {
             name: 'カレンダー',
@@ -43,6 +49,7 @@ function BottomNavContent() {
                         <Link
                             key={item.name}
                             href={item.href}
+                            aria-current={isActive ? 'page' : undefined}
                             className={clsx(
                                 "flex flex-col items-center justify-center w-full h-full transition-colors",
                                 isYahoo ? "active:bg-slate-800" : "active:bg-gray-50"

@@ -1,12 +1,19 @@
 import { NextResponse } from 'next/server';
 import { revalidateTag } from 'next/cache';
+import { cookies } from 'next/headers';
+import { SESSION_COOKIE, verifySession } from '@/lib/session';
 
 // This URL will be updated with the user's new deployment URL
 const GAS_API_URL = process.env.GAS_API_URL || '';
 
 const FIXED_COST_ACTIONS = ['getFixedCosts', 'addFixedCost', 'deleteFixedCost'];
 
+async function isAuthenticated() {
+    return verifySession((await cookies()).get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET);
+}
+
 export async function GET(request: Request) {
+    if (!await isAuthenticated()) return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
     try {
         const { searchParams } = new URL(request.url);
         const query = searchParams.toString();
@@ -30,6 +37,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+    if (!await isAuthenticated()) return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
     try {
         const body = await request.json();
         const res = await fetch(GAS_API_URL, {

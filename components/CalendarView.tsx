@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import BottomNav from '@/components/BottomNav';
 import ExpenseDetailModal from './ExpenseDetailModal';
+import ExpenseSearch from './ExpenseSearch';
 import { Expense } from '@/lib/api';
 
 interface CalendarViewProps {
@@ -35,6 +36,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
     const [currentDate, setCurrentDate] = useState(new Date());
     const [direction, setDirection] = useState(0);
     const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
+    const [view, setView] = useState<'calendar' | 'search'>('calendar');
 
     // Surface fetch failures without wiping the cached list
     useEffect(() => {
@@ -118,7 +120,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
     };
 
     const onTouchEnd = () => {
-        if (!touchStart || !touchEnd) return;
+        if (touchStart === null || touchEnd === null) return;
         const distance = touchStart - touchEnd;
         const isLeftSwipe = distance > minSwipeDistance;
         const isRightSwipe = distance < -minSwipeDistance;
@@ -148,11 +150,19 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
 
     return (
         <main
-            className={clsx("min-h-screen pb-24 overflow-x-hidden transition-colors", bgColor)}
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
+            className={clsx("min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))] overflow-x-hidden transition-colors", bgColor)}
         >
+            <div className={clsx('flex gap-2 p-4', textColor)}>
+                <button aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} className={clsx('flex-1 rounded-xl py-3', view === 'calendar' && 'bg-indigo-600 text-white')}>カレンダー</button>
+                <button aria-pressed={view === 'search'} onClick={() => setView('search')} className={clsx('flex-1 rounded-xl py-3', view === 'search' && 'bg-indigo-600 text-white')}>支出検索</button>
+            </div>
+            {error && <div role="alert" className={clsx('px-4 py-2', textColor)}>{error}。保存済みデータは維持しています。
+                <button onClick={refresh} disabled={loading} className="ml-2 underline">再取得</button>
+            </div>}
+            <div hidden={view !== 'search'}>
+                <ExpenseSearch expenses={expenses} loading={loading} error={error} onSelect={setSelectedExpense} isDarkMode={isDarkMode} />
+            </div>
+            <div hidden={view !== 'calendar'}>
             <AnimatePresence initial={false} custom={direction} mode="popLayout">
                 <motion.div
                     key={format(currentDate, 'yyyy-MM')}
@@ -167,6 +177,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                     }}
                     className="w-full"
                 >
+                    <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
                     {/* Header */}
                     <header className={clsx("px-6 py-4 z-10 border-b space-y-3", headerBg)}>
                         <div className="flex justify-between items-center">
@@ -271,6 +282,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                         })}
                     </div>
 
+                    </div>
                     {/* Daily Details List */}
                     <div className="px-4 py-6">
                         <h2 className={clsx("text-sm font-semibold mb-3 px-2 flex justify-between items-center", subTextColor)}>
@@ -323,6 +335,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                     </div>
                 </motion.div>
             </AnimatePresence>
+            </div>
 
             <ExpenseDetailModal
                 isOpen={!!selectedExpense}

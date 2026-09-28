@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import clsx from 'clsx';
 import { toast } from 'sonner';
 import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-react';
@@ -28,6 +29,42 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
     const [isUpdatingAmount, setIsUpdatingAmount] = useState(false);
     const [confirmingCategory, setConfirmingCategory] = useState(false);
     const [confirmingDelete, setConfirmingDelete] = useState(false);
+    const dialogRef = useRef<HTMLDivElement>(null);
+    const closeRef = useRef(onClose);
+    useEffect(() => { closeRef.current = onClose; }, [onClose]);
+
+    useEffect(() => {
+        if (!isOpen || !expense) return;
+        const body = document.body;
+        const previousFocus = document.activeElement as HTMLElement | null;
+        const scrollY = window.scrollY;
+        const previous = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow };
+        body.style.position = 'fixed';
+        body.style.top = `-${scrollY}px`;
+        body.style.width = '100%';
+        body.style.overflow = 'hidden';
+        dialogRef.current?.focus();
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') closeRef.current();
+            if (event.key !== 'Tab') return;
+            const elements = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]');
+            if (!elements?.length) return;
+            const first = elements[0];
+            const last = elements[elements.length - 1];
+            if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+                event.preventDefault(); last.focus();
+            } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialogRef.current)) {
+                event.preventDefault(); first.focus();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            Object.assign(body.style, previous);
+            window.scrollTo(0, scrollY);
+            previousFocus?.focus({ preventScroll: true });
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [isOpen, expense]);
 
     useEffect(() => {
         if (!isOpen || !expense) return;
@@ -224,13 +261,13 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             });
     };
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-sm max-h-[calc(100dvh-2rem)] overflow-y-auto shadow-xl transform transition-all">
+    return createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center px-4 pt-[calc(1rem+env(safe-area-inset-top))] pb-[calc(1rem+env(safe-area-inset-bottom))] bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="expense-detail-title" tabIndex={-1} className="bg-white dark:bg-slate-900 rounded-2xl w-full max-w-sm max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] overflow-y-auto overscroll-contain shadow-xl outline-none">
                 {/* Header */}
                 <div className="px-6 py-4 border-b border-gray-100 dark:border-slate-800 flex justify-between items-center">
-                    <h3 className="font-bold text-lg text-gray-900 dark:text-white">明細詳細</h3>
-                    <button onClick={onClose} className="p-2 -mr-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors">
+                    <h3 id="expense-detail-title" className="font-bold text-lg text-gray-900 dark:text-white">明細詳細</h3>
+                    <button aria-label="明細詳細を閉じる" onClick={onClose} className="p-2 -mr-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors">
                         <X size={20} />
                     </button>
                 </div>
@@ -373,6 +410,6 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                     </div>
                 </div>
             </div>
-        </div>
+        </div>, document.body
     );
 }

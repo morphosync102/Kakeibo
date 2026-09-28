@@ -1,19 +1,18 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { SESSION_COOKIE, verifySession } from '@/lib/session';
 
-export function middleware(request: NextRequest) {
-    // Check for session cookie
-    const sessionCallback = request.cookies.get('kakeibo_session');
+export async function middleware(request: NextRequest) {
 
     // Protected Routes
-    const protectedPaths = ['/', '/calendar', '/manage', '/api/expenses', '/yahoo'];
+    const protectedPaths = ['/', '/statistics', '/calendar', '/manage', '/api/expenses', '/yahoo'];
 
     // Check if current path matches any protected path
     const isProtected = protectedPaths.some(path =>
         request.nextUrl.pathname === path || request.nextUrl.pathname.startsWith(path + '/')
     );
 
-    if (isProtected && !sessionCallback) {
+    if (isProtected && !await verifySession(request.cookies.get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET)) {
         // Redirect to login if accessing protected route without session
         // For API routes, ideally return 401, but redirect handles unified logic for now
         if (request.nextUrl.pathname.startsWith('/api/')) {

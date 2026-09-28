@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # CLAUDE.md
 
 Next.js + Google Apps Script (GAS) + Google Sheets で構成された個人用家計簿アプリ。
