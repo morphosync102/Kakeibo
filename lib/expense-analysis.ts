@@ -76,6 +76,53 @@ export function aggregateExpenses(expenses: Expense[], period: StatisticsPeriod)
     return { points, totals };
 }
 
+export interface CategoryTotal {
+    category: string;
+    amount: number;
+    share: number;
+}
+
+const inPeriod = (date: string, period: StatisticsPeriod) => period.mode === 'all'
+    || (period.mode === 'year' ? Number(date.slice(0, 4)) === period.year : date.startsWith(period.month + '-'));
+
+// Expense totals per category for the selected period, largest first.
+export function aggregateCategories(expenses: Expense[], period: StatisticsPeriod): CategoryTotal[] {
+    const sums = new Map<string, number>();
+    for (const item of expenses) {
+        const date = dateKey(item.date);
+        if (item.type === 'Income' || !date || !inPeriod(date, period)) continue;
+        const category = item.category || '未分類';
+        sums.set(category, (sums.get(category) || 0) + item.amount);
+    }
+    const total = [...sums.values()].reduce((sum, value) => sum + value, 0);
+    return [...sums].map(([category, amount]) => ({ category, amount, share: total ? amount / total : 0 }))
+        .sort((a, b) => b.amount - a.amount || a.category.localeCompare(b.category));
+}
+
+// Expense totals per category and year (years descending, categories by overall total).
+export function categoryExpensesByYear(expenses: Expense[]) {
+    const sums = new Map<string, Map<number, number>>();
+    const yearSet = new Set<number>();
+    for (const item of expenses) {
+        const date = dateKey(item.date);
+        if (item.type === 'Income' || !date) continue;
+        const year = Number(date.slice(0, 4));
+        const category = item.category || '未分類';
+        yearSet.add(year);
+        const byYear = sums.get(category) || new Map<number, number>();
+        byYear.set(year, (byYear.get(year) || 0) + item.amount);
+        sums.set(category, byYear);
+    }
+    const years = [...yearSet].sort((a, b) => b - a);
+    const rows = [...sums].map(([category, byYear]) => ({
+        category,
+        amounts: years.map(year => byYear.get(year) || 0),
+        total: [...byYear.values()].reduce((sum, value) => sum + value, 0),
+    })).sort((a, b) => b.total - a.total || a.category.localeCompare(b.category));
+    const yearTotals = years.map((_, index) => rows.reduce((sum, row) => sum + row.amounts[index], 0));
+    return { years, rows, yearTotals };
+}
+
 const normalize = (value: string) => value.normalize('NFKC').trim().toLowerCase();
 export const expenseCategories = (expenses: Expense[]) => [...new Set(expenses
     .filter(item => item.type !== 'Income').map(item => item.category || '未分類'))].sort();

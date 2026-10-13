@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { aggregateExpenses, searchExpenses, expenseCategories } from '../lib/expense-analysis.ts';
+import { aggregateExpenses, aggregateCategories, categoryExpensesByYear, searchExpenses, expenseCategories } from '../lib/expense-analysis.ts';
 
 const item = (date, amount, type = 'Expense', merchant = '架空 Shop', category = '') => ({ date, amount, type, merchant, category });
 const data = [item('2024/12/31', 1000, 'Income'), item('2025/02/01', 400), item('2025/02/28', 100, undefined), item('2025/03/01', 20, 'Other')];
@@ -71,4 +71,17 @@ test('updated and deleted inputs are re-evaluated without mutating original data
     assert.equal(searchExpenses(data.map(x => ({ ...x, amount: 10 })), filters).items.length, 0);
     assert.equal(searchExpenses(data.filter(x => x !== data[1]), filters).total, 0);
     assert.equal(data[0].date, '2024/12/31');
+});
+test('category totals follow the period, exclude income and group blank as 未分類', () => {
+    const rows = [item('2024/05/01', 300, 'Expense', 'a', '食費'), item('2025/01/10', 200, 'Expense', 'b', '食費'),
+        item('2025/02/01', 600, 'Expense', 'c', '交通費'), item('2025/03/01', 200), item('2025/03/02', 9999, 'Income', 'd', '給料'), item('bad', 5)];
+    assert.deepEqual(aggregateCategories(rows, { mode: 'year', year: 2025 }).map(r => [r.category, r.amount, r.share]),
+        [['交通費', 600, 0.6], ['未分類', 200, 0.2], ['食費', 200, 0.2]]);
+    assert.deepEqual(aggregateCategories(rows, { mode: 'month', month: '2025-01' }).map(r => r.amount), [200]);
+    assert.equal(aggregateCategories(rows, { mode: 'all' })[0].category, '交通費');
+    assert.deepEqual(aggregateCategories([], { mode: 'all' }), []);
+    const yearly = categoryExpensesByYear(rows);
+    assert.deepEqual(yearly.years, [2025, 2024]);
+    assert.deepEqual(yearly.rows.map(r => [r.category, r.amounts, r.total]), [['交通費', [600, 0], 600], ['食費', [200, 300], 500], ['未分類', [200, 0], 200]]);
+    assert.deepEqual(yearly.yearTotals, [1000, 300]);
 });

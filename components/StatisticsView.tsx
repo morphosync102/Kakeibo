@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { clsx } from 'clsx';
 import { useExpenses } from '@/hooks/useExpenses';
-import { aggregateExpenses, dateKey, type StatisticsPeriod } from '@/lib/expense-analysis';
+import { aggregateCategories, aggregateExpenses, categoryExpensesByYear, dateKey, type StatisticsPeriod } from '@/lib/expense-analysis';
 import BottomNav from './BottomNav';
 
 const yen = (value: number) => `¥${value.toLocaleString()}`;
@@ -20,6 +20,9 @@ export default function StatisticsView({ source, isDarkMode = false }: { source?
     const period: StatisticsPeriod = mode === 'all' ? { mode } : mode === 'year' ? { mode, year } : { mode, month };
     const { points, totals } = useMemo(() => aggregateExpenses(expenses,
         mode === 'all' ? { mode } : mode === 'year' ? { mode, year } : { mode, month }), [expenses, mode, year, month]);
+    const categoryTotals = useMemo(() => aggregateCategories(expenses,
+        mode === 'all' ? { mode } : mode === 'year' ? { mode, year } : { mode, month }), [expenses, mode, year, month]);
+    const yearly = useMemo(() => categoryExpensesByYear(expenses), [expenses]);
     const years = useMemo(() => {
         const values = expenses.flatMap(item => dateKey(item.date) ? [Number(item.date.slice(0, 4))] : []);
         const first = values.reduce((min, value) => Math.min(min, value), new Date().getFullYear());
@@ -100,6 +103,38 @@ export default function StatisticsView({ source, isDarkMode = false }: { source?
                                 </ResponsiveContainer>
                             </div>
                         </section>
+                        {categoryTotals.length > 0 && <section className={card} aria-label="カテゴリ別支出">
+                            <h2 className="font-semibold mb-3">カテゴリ別支出{mode === 'year' ? `（${year}年）` : mode === 'month' ? `（${month}）` : '（全期間）'}</h2>
+                            <ul className="space-y-3">
+                                {categoryTotals.map(row => (
+                                    <li key={row.category}>
+                                        <div className="flex justify-between gap-2 text-sm">
+                                            <span className="truncate">{row.category}</span>
+                                            <span className="shrink-0 font-semibold">{yen(row.amount)}<span className="ml-2 opacity-60 font-normal">{(row.share * 100).toFixed(1)}%</span></span>
+                                        </div>
+                                        <div className={clsx('h-2 mt-1 rounded-full overflow-hidden', isDarkMode ? 'bg-slate-800' : 'bg-gray-100')}>
+                                            <div className="h-full rounded-full bg-amber-500" style={{ width: `${(row.amount / categoryTotals[0].amount) * 100}%` }} />
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </section>}
+                        {mode === 'all' && yearly.rows.length > 0 && <section className={card} aria-label="年別カテゴリ支出">
+                            <h2 className="font-semibold mb-3">年別カテゴリ支出</h2>
+                            <div className="overflow-x-auto"><table className="w-full text-sm text-right whitespace-nowrap">
+                                <caption className="sr-only">カテゴリごとの年間支出</caption>
+                                <thead><tr><th className={clsx('p-2 text-left sticky left-0', isDarkMode ? 'bg-slate-900' : 'bg-white')}>カテゴリ</th>{yearly.years.map(value => <th key={value} className="p-2">{value}年</th>)}</tr></thead>
+                                <tbody>
+                                    {yearly.rows.map(row => <tr key={row.category}>
+                                        <th className={clsx('p-2 text-left font-normal sticky left-0', isDarkMode ? 'bg-slate-900' : 'bg-white')}>{row.category}</th>
+                                        {row.amounts.map((value, index) => <td key={yearly.years[index]} className="p-2">{value ? yen(value) : '-'}</td>)}
+                                    </tr>)}
+                                    <tr className="font-semibold border-t"><th className={clsx('p-2 text-left sticky left-0', isDarkMode ? 'bg-slate-900' : 'bg-white')}>合計</th>
+                                        {yearly.yearTotals.map((value, index) => <td key={yearly.years[index]} className="p-2">{yen(value)}</td>)}
+                                    </tr>
+                                </tbody>
+                            </table></div>
+                        </section>}
                         <details className={card}>
                             <summary className="cursor-pointer">集計値を表で確認</summary>
                             <div className="overflow-x-auto mt-3"><table className="w-full text-sm text-right whitespace-nowrap">
