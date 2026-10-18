@@ -4,7 +4,7 @@ import clsx from 'clsx';
 import { toast } from 'sonner';
 import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-react';
 import { Expense } from '@/lib/api';
-import { EXPENSE_CATEGORIES } from '@/lib/categories';
+import { categoriesForType } from '@/lib/categories';
 
 interface ExpenseDetailModalProps {
     isOpen: boolean;
@@ -346,7 +346,7 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                                 onChange={(e) => { setSelectedCategory(e.target.value); setConfirmingCategory(false); }}
                                 className="w-full text-base p-3 bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-white"
                             >
-                                {EXPENSE_CATEGORIES.map(cat => (
+                                {categoriesForType(expense.type).map(cat => (
                                     <option key={cat} value={cat}>{cat}</option>
                                 ))}
                             </select>
