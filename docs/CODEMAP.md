@@ -16,7 +16,7 @@
 | `app/yahoo/page.tsx` ほか `yahoo/` 配下 | 個人用。同じコンポーネントに `source="yahoo"` `isDarkMode` を渡すだけ |
 | `app/yahoo/layout.tsx` | 個人用のメタデータ・ダーク背景(`BodyBackgroundSetter`) |
 | `app/login/page.tsx` | パスワード認証画面 |
-| `app/api/expenses/route.ts` | **GASへの唯一のプロキシ**。GET・POSTとも署名付きセッションを独立検証してからGASに接続。GETはタグキャッシュ、POSTは透過転送＋関連タグ無効化 |
+| `app/api/expenses/route.ts` | **GASへの唯一のプロキシ**。GET・POSTとも署名付きセッションを独立検証してからGASに接続。GET・POSTとも source を検証(不正は400)。GETは `unstable_cache`(タグ別5分、配列以外は502でキャッシュしない。`fresh=1` は迂回して GAS を直接読む)、`maxDuration = 60`、POSTは透過転送＋関連タグ無効化 |
 | `app/api/auth/verify/route.ts` | `APP_PASSWORD` 照合、署名付き`kakeibo_session` Cookie(30日)発行。署名鍵未設定時は拒否 |
 
 ### components/
@@ -37,12 +37,13 @@
 | ファイル | 責務 |
 | --- | --- |
 | `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新(未完了の書き込み中・取得開始後の変更があった取得結果は破棄し、書き込み完了後に再取得)、`error` で失敗通知(失敗時もキャッシュ維持) |
-| `lib/api.ts` | `Expense` 型と `fetchExpenses()`(`/api/expenses` を叩き日付降順ソート。エラー時は throw) |
+| `lib/api.ts` | `Expense` 型と `fetchExpenses(source, { fresh })`(`/api/expenses` を叩き日付降順ソート。`fresh` でサーバーキャッシュ迂回。エラー時は throw) |
 | `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `lib/expense-analysis.ts` | 純粋関数：日付の厳密な正規化、期間集計・ゼロ補完・累積値、支出検索条件の検証・AND絞り込み・合計、カテゴリ候補 |
 | `middleware.ts` | セッションの署名・期限による画面・API保護。無効な場合、APIは401、画面は`/login?returnTo=`へ |
+| `lib/expenses-proxy.ts` | プロキシ用の純粋関数: `isAllowedSource()`(省略/main/yahoo)、`parseGasList()`(配列以外は例外) |
 | `lib/session.ts` | サーバー用Web Crypto HMAC-SHA256によるセッション発行・署名／期限／形式検証。乱数nonceと環境変数`SESSION_SECRET`を使用 |
-| `lib/write-queue.ts` | クライアント書き込みの直列化。`postWrite()` が `/api/expenses` への POST(`keepalive`)を1本の Promise チェーンで順に送る(失敗しても次を送る)。未完了数の購読/取得、取得結果を適用してよいかの判定 `shouldApplyFetch()` |
+| `lib/write-queue.ts` | クライアント書き込みの直列化。`postWrite()` が `/api/expenses` への POST(`keepalive`、45秒タイムアウト。時間切れは失敗確定ではない `WriteTimeoutError`)を1本の Promise チェーンで順に送る(失敗・時間切れでも次を送る)。未完了数の購読/取得と完了数、取得結果を適用してよいかの判定 `shouldApplyFetch()`、破棄後の動作 `fetchDiscardAction()` |
 | `gas/コード.js` | **GAS ソースの正本**(約900行、clasp で本番と同期)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
 | `gas/appsscript.json` | GAS マニフェスト(タイムゾーン・Web アプリ設定) |
 | `.github/workflows/deploy-gas.yml` | main への push(`gas/**` 変更時)で clasp push + 既存デプロイ ID へ deploy |

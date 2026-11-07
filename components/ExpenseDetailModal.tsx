@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-react';
 import { Expense } from '@/lib/api';
 import { categoriesForType } from '@/lib/categories';
-import { postWrite } from '@/lib/write-queue';
+import { isWriteTimeout, postWrite } from '@/lib/write-queue';
 
 interface ExpenseDetailModalProps {
     isOpen: boolean;
@@ -86,10 +86,15 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
     // GAS in the background through the serial write queue (a follow-up edit of
     // the same row strict-matches on the values this write stores). Always
     // refresh afterwards so the screen converges on the server state (restores
-    // the row if the write failed).
+    // the row if the write failed). A timeout is not a definite failure: the
+    // write may still land, and the refresh shows whichever state GAS has.
     const sendInBackground = (payload: Record<string, unknown>, failureMessage: string) => {
         postWrite({ source, ...payload })
             .catch((e: unknown) => {
+                if (isWriteTimeout(e)) {
+                    toast.warning('通信がタイムアウトしました。反映されている可能性があります。一覧で確認してください');
+                    return;
+                }
                 const reason = e instanceof Error ? e.message : '';
                 toast.error(reason ? `${failureMessage}: ${reason}` : failureMessage);
             })

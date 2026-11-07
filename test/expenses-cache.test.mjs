@@ -45,3 +45,12 @@ test('fetch results are gated by local edits and pending writes', () => {
   assert.match(hookSource, /subscribePendingWrites\(/);
   assert.match(hookSource, /reloadAfterWrites\.current = true/);
 });
+
+test('refetches after writes and manual refreshes bypass the server cache; startup uses it', () => {
+  // refresh() is the write-completion callback (onUpdate) and the manual button
+  assert.match(hookSource, /const refresh = useCallback\(\(\) => runLoad\(true\)/);
+  assert.match(hookSource, /if \(next === 'reload-now'\) return load\(true\)/);
+  assert.match(hookSource, /load\(true\)\.catch/, 'the drain reload is fresh');
+  assert.match(hookSource, /runLoad\(false\)/, 'startup without local cache uses the server cache');
+  assert.match(hookSource, /load\(false\)\.catch/, 'startup background fetch uses the server cache');
+});

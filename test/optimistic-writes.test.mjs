@@ -60,10 +60,36 @@ test('manual entry clears the form immediately and never overwrites a newer inpu
   assert.match(fn, /mountedRef\.current/);
   assert.match(fn, /isEntryEmpty\(formRef\.current\)/);
   assert.match(fn, /setFormData\(submitted\)/);
+  // A timeout is not a definite failure: never restore (a resend could duplicate)
+  const timeoutAt = fn.indexOf('isWriteTimeout(e)');
+  assert.ok(timeoutAt !== -1 && timeoutAt < fn.indexOf('setFormData(submitted)'), 'timeout is handled before the restore branch');
+  assert.match(fn, /反映されている可能性があります。一覧で確認してください/);
   // Otherwise tell the user what failed instead of clobbering the form
   assert.match(fn, /toast\.error\(`追加に失敗しました: \$\{describe\}`\)/);
 });
 
+test('fixed cost delete sends the identifying fields so GAS can match the row', () => {
+  const fn = body(manageSource, 'handleDelete');
+  for (const field of ['id: item.id', 'type: item.type', 'name: item.name', 'amount: item.amount', 'day: item.day', 'category: item.category']) {
+    assert.ok(fn.includes(field), `deleteFixedCost must send ${field}`);
+  }
+});
+
 test('fixed cost writes check the GAS result instead of assuming success', () => {
   assert.doesNotMatch(manageSource, /alert\(/);
+});
+
+test('the modal reports a timeout as possibly applied, then reconciles', () => {
+  const helper = body(modalSource, 'sendInBackground');
+  assert.match(helper, /isWriteTimeout\(e\)/);
+  assert.match(helper, /反映されている可能性があります/);
+  assert.match(helper, /finally\(\(\) => onUpdate\(\)\)/);
+});
+
+test('fixed cost writes treat a timeout as possibly applied and refetch fresh data', () => {
+  for (const name of ['handleAdd', 'handleDelete']) {
+    assert.match(body(manageSource, name), /isWriteTimeout\(/, `${name} must handle timeouts`);
+    assert.match(body(manageSource, name), /fetchFixedCosts\(true\)/, `${name} must refetch fresh`);
+  }
+  assert.match(manageSource, /params\.set\('fresh', '1'\)/);
 });

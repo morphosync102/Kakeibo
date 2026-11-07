@@ -16,14 +16,17 @@ async function loadRoute(path, token, env = {}) {
     const exports = {};
     const calls = [];
     const session = await import('../lib/session.ts');
+    const proxy = await import('../lib/expenses-proxy.ts');
     vm.runInNewContext(code, {
         exports, process: { env: { SESSION_SECRET: secret, GAS_API_URL: 'http://localhost/synthetic-upstream', ...env } },
-        Request, Response, URL, console,
-        fetch: async (...args) => { calls.push(args); return Response.json({ success: true }); },
+        Request, Response, URL, URLSearchParams, console,
+        // GAS lists are arrays; writes answer { success }
+        fetch: async (...args) => { calls.push(args); return Response.json(args[1]?.method === 'POST' ? { success: true } : []); },
         require: name => {
             if (name === '@/lib/session') return session;
+            if (name === '@/lib/expenses-proxy') return proxy;
             if (name === 'next/headers') return { cookies: async () => ({ get: () => token ? { value: token } : undefined }) };
-            if (name === 'next/cache') return { revalidateTag() {} };
+            if (name === 'next/cache') return { revalidateTag() {}, unstable_cache: fn => fn };
             return require(name);
         },
     });
@@ -34,6 +37,7 @@ test('GET and POST reject missing/legacy sessions without invoking GAS even with
     for (const token of [undefined, 'authenticated', 'forged']) {
         const route = await loadRoute('../app/api/expenses/route.ts', token);
         assert.equal((await route.GET(new Request('http://localhost/api/expenses'))).status, 401);
+        assert.equal((await route.GET(new Request('http://localhost/api/expenses?fresh=1'))).status, 401);
         assert.equal((await route.POST(new Request('http://localhost/api/expenses', { method: 'POST', body: '{}' }))).status, 401);
         assert.equal(route.calls.length, 0);
     }

@@ -7,7 +7,7 @@ import { PlusCircle, RefreshCw, Check } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/lib/categories';
-import { postWrite } from '@/lib/write-queue';
+import { isWriteTimeout, postWrite } from '@/lib/write-queue';
 
 interface ManageViewProps {
     source?: string;
@@ -62,6 +62,8 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
     // send in the background through the serial write queue. On failure the
     // submitted values come back only if the inputs are still empty; a newer
     // input (or an unmounted view) gets a toast naming the failed entry instead.
+    // A timeout may still have been applied, so it never restores (a resend
+    // would duplicate the row): the user is asked to check the list.
     const handleSubmit = () => {
         const amount = Number(formData.amount);
         if (!formData.amount || !isFinite(amount) || amount <= 0) {
@@ -84,12 +86,16 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
             source: source // Pass source context
         }).catch(e => {
             console.error(e);
+            const describe = `${merchant} ¥${amount.toLocaleString()}`;
+            if (isWriteTimeout(e)) {
+                toast.warning(`通信がタイムアウトしました(${describe})。反映されている可能性があります。一覧で確認してください`);
+                return;
+            }
             if (mountedRef.current && isEntryEmpty(formRef.current)) {
                 setFormData(submitted);
                 toast.error('追加に失敗しました。入力内容を戻しました');
                 return;
             }
-            const describe = `${merchant} ¥${amount.toLocaleString()}`;
             toast.error(`追加に失敗しました: ${describe}`);
         });
     };
@@ -264,12 +270,17 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
 
     const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
-    // Initial Fetch (served from the Next.js 'fixedCosts' tag cache,
-    // which POST writes revalidate — no cache-busting param needed)
-    const fetchFixedCosts = useCallback(async () => {
+    // Initial fetch is served from the Next.js 'fixedCosts' tag cache (which
+    // POST writes revalidate). Refetches after a write and the manual refresh
+    // pass fresh=true to bypass it, so a list cached by a read that raced the
+    // write is never shown.
+    const fetchFixedCosts = useCallback(async (fresh = false) => {
         setIsLoading(true);
         try {
-            const url = `/api/expenses?action=getFixedCosts${source ? `&source=${source}` : ''}`;
+            const params = new URLSearchParams({ action: 'getFixedCosts' });
+            if (source) params.set('source', source);
+            if (fresh) params.set('fresh', '1');
+            const url = `/api/expenses?${params.toString()}`;
             const res = await fetch(url);
             if (!res.ok) throw new Error('Fetch failed');
             const data = await res.json();
@@ -302,9 +313,17 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
             setShowForm(false);
             setNewItem({ ...newItem, name: '', amount: '' });
             toast.success('定期設定を追加しました');
-            fetchFixedCosts(); // Refresh list
-        } catch {
-            toast.error('追加に失敗しました');
+            fetchFixedCosts(true); // Refresh list
+        } catch (e) {
+            if (isWriteTimeout(e)) {
+                // May have been added: close the form so it is not resent, and show the list
+                setShowForm(false);
+                setNewItem({ ...newItem, name: '', amount: '' });
+                toast.warning('通信がタイムアウトしました。反映されている可能性があります。一覧で確認してください');
+                fetchFixedCosts(true);
+            } else {
+                toast.error('追加に失敗しました');
+            }
         } finally {
             setIsAdding(false);
         }
@@ -321,16 +340,27 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
         setFixedCosts(previous.filter(f => f.id !== item.id));
         toast.success('削除しました');
 
+        // Identifying fields let GAS match the row even if the list is stale
+        // (rows shifted by another delete or a manual sheet edit)
         postWrite({
             action: 'deleteFixedCost',
             id: item.id,
+            type: item.type,
+            name: item.name,
+            amount: item.amount,
+            day: item.day,
+            category: item.category,
             source // Pass source
         })
-            .catch(() => {
+            .catch(e => {
+                if (isWriteTimeout(e)) {
+                    toast.warning('通信がタイムアウトしました。反映されている可能性があります。一覧で確認してください');
+                    return; // the fresh refetch below shows whether it was deleted
+                }
                 toast.error('削除に失敗しました');
                 setFixedCosts(previous);
             })
-            .finally(() => fetchFixedCosts());
+            .finally(() => fetchFixedCosts(true));
     };
 
     const cardBg = isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-gray-100";
@@ -347,7 +377,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
             <div className={clsx("p-4 rounded-2xl shadow-sm border min-h-[100px]", cardBg)}>
                 <div className="flex justify-between items-center mb-4">
                     <h3 className={clsx("font-bold", textColor)}>登録済みの定期設定</h3>
-                    <button onClick={fetchFixedCosts} className={clsx("p-1 rounded-full", isDarkMode ? "hover:bg-slate-800 text-gray-400" : "hover:bg-gray-50 text-gray-400")}>
+                    <button onClick={() => fetchFixedCosts(true)} className={clsx("p-1 rounded-full", isDarkMode ? "hover:bg-slate-800 text-gray-400" : "hover:bg-gray-50 text-gray-400")}>
                         <RefreshCw size={14} className={isLoading ? "animate-spin" : ""} />
                     </button>
                 </div>

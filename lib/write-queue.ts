@@ -14,6 +14,7 @@ type PendingListener = (pending: number) => void;
 export function createWriteQueue() {
     let tail: Promise<unknown> = Promise.resolve();
     let pendingCount = 0;
+    let settledCount = 0; // monotonic: writes finished (success or failure)
     const listeners = new Set<PendingListener>();
 
     const setPending = (next: number) => {
@@ -29,7 +30,10 @@ export function createWriteQueue() {
         setPending(pendingCount + 1);
         const result = tail
             .then(() => task())
-            .finally(() => setPending(pendingCount - 1));
+            .finally(() => {
+                settledCount += 1;
+                setPending(pendingCount - 1);
+            });
         tail = result.then(() => undefined, () => undefined);
         return result;
     }
@@ -39,18 +43,41 @@ export function createWriteQueue() {
         return () => { listeners.delete(listener); };
     }
 
-    return { enqueue, subscribe, pending: () => pendingCount };
+    return { enqueue, subscribe, pending: () => pendingCount, settled: () => settledCount };
 }
 
-// Whether a fetched expense list may replace local state. Data fetched while a
-// write is queued or in flight, or before the latest optimistic edit, predates
-// that edit and would roll it back on screen.
-export function shouldApplyFetch({ startedVersion, currentVersion, pendingWrites }: {
+// Whether a fetched expense list may replace local state. It must not if a
+// local edit happened during the fetch, a write was pending when it started or
+// is pending now, or a write finished while it was in flight: in all of those
+// cases the server may have answered with data that predates a write, and
+// applying it would roll that write back on screen (even after a newer fetch,
+// started once the write had finished, was already applied).
+export function shouldApplyFetch({
+    startedVersion, currentVersion, pendingAtStart, pendingWrites, settledAtStart, settledWrites,
+}: {
     startedVersion: number;
     currentVersion: number;
+    pendingAtStart: number;
     pendingWrites: number;
+    settledAtStart: number;
+    settledWrites: number;
 }) {
-    return startedVersion === currentVersion && pendingWrites === 0;
+    return startedVersion === currentVersion
+        && pendingAtStart === 0
+        && pendingWrites === 0
+        && settledAtStart === settledWrites;
+}
+
+// What to do with a fetch result that shouldApplyFetch rejected:
+// - writes still queued: fetch again once the queue drains
+// - queue idle and no newer fetch started: fetch again now
+// - a newer fetch already started (after this one): it will converge
+export function fetchDiscardAction({ pendingWrites, newerFetchStarted }: {
+    pendingWrites: number;
+    newerFetchStarted: boolean;
+}): 'reload-after-writes' | 'reload-now' | 'none' {
+    if (pendingWrites > 0) return 'reload-after-writes';
+    return newerFetchStarted ? 'none' : 'reload-now';
 }
 
 const writeQueue = createWriteQueue();
@@ -58,22 +85,57 @@ const writeQueue = createWriteQueue();
 export const enqueueWrite = writeQueue.enqueue;
 export const subscribePendingWrites = writeQueue.subscribe;
 export const getPendingWrites = writeQueue.pending;
+export const getSettledWrites = writeQueue.settled;
+
+// GAS waits up to 20s for its script lock, plus a cold start and the write
+// itself. A timeout that fires while GAS is still working reports a failure
+// for a write that may land, and the UI may then offer to resend it, so keep a
+// generous margin.
+export const WRITE_TIMEOUT_MS = 45000;
 
 export type WriteResult = { success?: boolean; error?: string; [key: string]: unknown };
+
+// A write that timed out is NOT a definite failure: GAS may still apply it.
+// Callers must not restore input / offer a resend for it (that could create a
+// duplicate); they tell the user to check the list and refetch instead.
+export class WriteTimeoutError extends Error {
+    constructor() {
+        super('通信がタイムアウトしました');
+        this.name = 'WriteTimeoutError';
+    }
+}
+
+export function isWriteTimeout(error: unknown): boolean {
+    return error instanceof Error && error.name === 'WriteTimeoutError';
+}
 
 // POST one write to /api/expenses through the shared queue. Resolves with the
 // GAS response on success and rejects (with GAS's error message when present)
 // otherwise. keepalive lets the request finish if the page is closed or
-// navigated away right after an optimistic edit.
-export function postWrite(payload: Record<string, unknown>): Promise<WriteResult> {
+// navigated away right after an optimistic edit; it can be combined with an
+// abort signal (Fetch spec), which ends a hung request after timeoutMs so the
+// queue moves on to the next write; that rejection is a WriteTimeoutError.
+export function postWrite(
+    payload: Record<string, unknown>,
+    { timeoutMs = WRITE_TIMEOUT_MS }: { timeoutMs?: number } = {},
+): Promise<WriteResult> {
     return enqueueWrite(async () => {
-        const res = await fetch('/api/expenses', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            keepalive: true,
-        });
-        const data = await res.json() as WriteResult;
+        let data: WriteResult;
+        try {
+            const res = await fetch('/api/expenses', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                keepalive: true,
+                signal: AbortSignal.timeout(timeoutMs),
+            });
+            data = await res.json() as WriteResult;
+        } catch (e) {
+            if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+                throw new WriteTimeoutError();
+            }
+            throw e;
+        }
         if (!data?.success) throw new Error(data?.error || 'Unknown error');
         return data;
     });

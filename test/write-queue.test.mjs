@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createWriteQueue, shouldApplyFetch } from '../lib/write-queue.ts';
+import { createWriteQueue, fetchDiscardAction, isWriteTimeout, postWrite, shouldApplyFetch, WRITE_TIMEOUT_MS } from '../lib/write-queue.ts';
 
 const deferred = () => {
     let resolve;
@@ -64,9 +64,68 @@ test('pending count is published to subscribers and already decremented when the
     assert.deepEqual(seen, [1, 2, 1, 0], 'unsubscribed listeners are not called');
 });
 
-test('fetch results apply only with no pending writes and no local edit since the fetch started', () => {
-    assert.equal(shouldApplyFetch({ startedVersion: 3, currentVersion: 3, pendingWrites: 0 }), true);
-    assert.equal(shouldApplyFetch({ startedVersion: 3, currentVersion: 4, pendingWrites: 0 }), false);
-    assert.equal(shouldApplyFetch({ startedVersion: 3, currentVersion: 3, pendingWrites: 1 }), false);
-    assert.equal(shouldApplyFetch({ startedVersion: 3, currentVersion: 4, pendingWrites: 2 }), false);
+test('settled count advances once per finished write, success or failure', async () => {
+    const queue = createWriteQueue();
+    assert.equal(queue.settled(), 0);
+    const gate = deferred();
+    const a = queue.enqueue(() => gate.promise);
+    assert.equal(queue.settled(), 0, 'not settled while in flight');
+    gate.resolve();
+    await a;
+    assert.equal(queue.settled(), 1);
+    await assert.rejects(queue.enqueue(async () => { throw new Error('x'); }));
+    assert.equal(queue.settled(), 2);
+});
+
+const base = { startedVersion: 3, currentVersion: 3, pendingAtStart: 0, pendingWrites: 0, settledAtStart: 5, settledWrites: 5 };
+
+test('fetch results apply only if no write was pending or finished and no local edit happened during the fetch', () => {
+    assert.equal(shouldApplyFetch(base), true);
+    assert.equal(shouldApplyFetch({ ...base, currentVersion: 4 }), false, 'local edit during the fetch');
+    assert.equal(shouldApplyFetch({ ...base, pendingWrites: 1 }), false, 'write still pending');
+    assert.equal(shouldApplyFetch({ ...base, pendingAtStart: 1 }), false, 'started while a write was in flight (may predate it)');
+    assert.equal(shouldApplyFetch({ ...base, settledWrites: 6 }), false, 'a write finished while the fetch was in flight');
+    // Round-1 Low1: Y started during a write, Z after it; Y returning last must not win
+    assert.equal(shouldApplyFetch({ ...base, pendingAtStart: 1, settledAtStart: 5, settledWrites: 6 }), false);
+});
+
+test('a discarded fetch waits for the queue, reloads, or defers to a newer fetch', () => {
+    assert.equal(fetchDiscardAction({ pendingWrites: 2, newerFetchStarted: false }), 'reload-after-writes');
+    assert.equal(fetchDiscardAction({ pendingWrites: 1, newerFetchStarted: true }), 'reload-after-writes');
+    assert.equal(fetchDiscardAction({ pendingWrites: 0, newerFetchStarted: false }), 'reload-now');
+    assert.equal(fetchDiscardAction({ pendingWrites: 0, newerFetchStarted: true }), 'none');
+});
+
+test('postWrite sends a keepalive POST with a timeout signal and rejects on a GAS error', async (t) => {
+    const calls = [];
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+        calls.push({ url, init });
+        return { json: async () => (JSON.parse(init.body).action === 'bad' ? { error: 'Busy' } : { success: true }) };
+    });
+    assert.deepEqual(await postWrite({ action: 'ok' }), { success: true });
+    assert.equal(calls[0].url, '/api/expenses');
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(calls[0].init.keepalive, true);
+    assert.ok(calls[0].init.signal instanceof AbortSignal);
+    const failure = await postWrite({ action: 'bad' }).then(() => null, e => e);
+    assert.match(failure.message, /Busy/);
+    assert.equal(isWriteTimeout(failure), false, 'a GAS error is a definite failure');
+    assert.equal(isWriteTimeout(new Error('x')), false);
+    assert.equal(isWriteTimeout(undefined), false);
+    assert.ok(WRITE_TIMEOUT_MS >= 30000, 'must outlast the GAS lock wait (20s) plus processing');
+});
+
+test('a write that times out fails and the next queued write still runs', async (t) => {
+    t.mock.method(globalThis, 'fetch', (url, init) => {
+        if (JSON.parse(init.body).action === 'hang') {
+            return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+        }
+        return Promise.resolve({ json: async () => ({ success: true }) });
+    });
+    const hung = postWrite({ action: 'hang' }, { timeoutMs: 20 });
+    const next = postWrite({ action: 'next' });
+    const error = await hung.then(() => null, e => e);
+    assert.match(error.message, /タイムアウト/);
+    assert.equal(isWriteTimeout(error), true, 'a timeout is distinguishable: the write may still have landed');
+    assert.deepEqual(await next, { success: true });
 });

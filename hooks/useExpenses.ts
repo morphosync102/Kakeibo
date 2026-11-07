@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchExpenses, Expense } from '@/lib/api';
-import { getPendingWrites, shouldApplyFetch, subscribePendingWrites } from '@/lib/write-queue';
+import { fetchDiscardAction, getPendingWrites, getSettledWrites, shouldApplyFetch, subscribePendingWrites } from '@/lib/write-queue';
 
 const STORAGE_KEY = 'kakeibo_expenses_cache';
 
@@ -25,6 +25,8 @@ export function useExpenses(source?: string) {
     // Set when a fetch result was dropped because writes were still queued;
     // the list is fetched again once the write queue drains.
     const reloadAfterWrites = useRef(false);
+    // Incremented by every load; tells a discarded load whether a newer one is on its way
+    const loadSeq = useRef(0);
 
     const cacheKey = source ? `${STORAGE_KEY}_${source}` : STORAGE_KEY;
 
@@ -33,19 +35,33 @@ export function useExpenses(source?: string) {
         localStorage.setItem(cacheKey, JSON.stringify(data));
     }, [cacheKey]);
 
-    // Fetch and apply unless a local mutation happened while it was in flight
-    // or a write is still pending (its result would temporarily roll it back)
-    const load = useCallback(async () => {
+    // Fetch and apply unless the result may predate a write (see shouldApplyFetch):
+    // a local mutation or a write (pending, or finished) overlapped the fetch.
+    // A discarded result is fetched again once no write is pending.
+    // fresh: bypass the proxy's server cache. Used for every refetch that must
+    // reflect a write (it may have raced a cached read) and for manual refresh.
+    const load = useCallback(async (fresh: boolean): Promise<void> => {
+        const seq = ++loadSeq.current;
         const startedAt = mutationVersion.current;
+        const pendingAtStart = getPendingWrites();
+        const settledAtStart = getSettledWrites();
         reloadAfterWrites.current = false;
-        const data = await fetchExpenses(source);
+        const data = await fetchExpenses(source, { fresh });
         const apply = shouldApplyFetch({
             startedVersion: startedAt,
             currentVersion: mutationVersion.current,
+            pendingAtStart,
             pendingWrites: getPendingWrites(),
+            settledAtStart,
+            settledWrites: getSettledWrites(),
         });
         if (!apply) {
-            if (getPendingWrites() > 0) reloadAfterWrites.current = true;
+            const next = fetchDiscardAction({
+                pendingWrites: getPendingWrites(),
+                newerFetchStarted: loadSeq.current !== seq,
+            });
+            if (next === 'reload-after-writes') reloadAfterWrites.current = true;
+            if (next === 'reload-now') return load(true);
             return;
         }
         persist(data);
@@ -60,7 +76,7 @@ export function useExpenses(source?: string) {
         if (pending !== 0 || !reloadAfterWrites.current) return;
         setTimeout(() => {
             if (!reloadAfterWrites.current) return;
-            load().catch(e => {
+            load(true).catch(e => {
                 console.error(e);
                 setError('データの取得に失敗しました');
             });
@@ -80,10 +96,10 @@ export function useExpenses(source?: string) {
         }
     }, [cacheKey]);
 
-    const refresh = useCallback(async () => {
+    const runLoad = useCallback(async (fresh: boolean) => {
         setLoading(true); // Optional: show spinner if user manually triggered
         try {
-            await load();
+            await load(fresh);
         } catch (error) {
             // Keep whatever is on screen (cache) instead of wiping it
             console.error('Failed to refresh data', error);
@@ -92,6 +108,10 @@ export function useExpenses(source?: string) {
             setLoading(false);
         }
     }, [load]);
+
+    // Write completion (modal onUpdate) and the manual refresh button: always fresh.
+    // Takes no arguments on purpose (it is used directly as an onClick handler).
+    const refresh = useCallback(() => runLoad(true), [runLoad]);
 
     // Optimistic mutations: update local state (and cache) immediately,
     // callers run refresh() in the background to reconcile with the server.
@@ -118,19 +138,20 @@ export function useExpenses(source?: string) {
         });
     }, [cacheKey]);
 
-    // Auto-fetch in background if cache exists, or fetch immediately if empty
+    // Auto-fetch in background if cache exists, or fetch immediately if empty.
+    // Startup reads may use the proxy's server cache (no write to reflect).
     useEffect(() => {
         const cached = localStorage.getItem(cacheKey);
         if (!cached) {
-            refresh();
+            runLoad(false);
         } else {
             // Background update (silent refresh)
-            load().catch(e => {
+            load(false).catch(e => {
                 console.error(e);
                 setError('データの取得に失敗しました');
             });
         }
-    }, [refresh, load, cacheKey]);
+    }, [runLoad, load, cacheKey]);
 
     return { expenses, loading, error, refresh, removeLocal, updateLocal };
 }

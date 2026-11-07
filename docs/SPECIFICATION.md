@@ -68,7 +68,11 @@ Browser
 - 明細1件を削除できます(2タップ確認)。
 - 破壊的でない書き込みは楽観的更新で即時反映し、結果はトーストで通知します。
   書き込みは送信順に1件ずつGASへ送り(`lib/write-queue.ts`)、同じ明細への連続編集が
-  前の変更後の値で照合されるようにします。未完了の書き込みがある間の再取得結果は画面に適用しません。
+  前の変更後の値で照合されるようにします。各書き込みは45秒でタイムアウトし、次の書き込みへ進みます。タイムアウトは失敗確定ではない(GASで反映済みの
+  可能性がある)ため、入力欄の復元や失敗扱いはせず「反映されている可能性があります。一覧で確認してください」と
+  表示し、その後の再取得で収束させます。
+  再取得結果は、取得中にローカル変更があった場合、取得開始時または終了時に未完了の書き込みがある場合、
+  取得中に書き込みが完了した場合は画面に適用せず、書き込みがなくなった時点で取り直します。
 
 明細1件の更新・削除は、同じMessageIdを共有する別明細の誤操作を防ぐため、
 次をすべて照合します。
@@ -163,6 +167,16 @@ Next.jsは`GAS_API_URL`へリクエストを転送します。
 
 `source`はGET/POST共通で、省略・空文字・`main`(家庭用)と`yahoo`(個人用)のみ受理します。
 それ以外(`Yahoo`等の表記ゆれを含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
+Next.jsプロキシはGASを呼ぶ前に検証し、省略・`main`・`yahoo`以外(空文字を含む)は
+HTTP 400 `{ "error": "Invalid source" }`を返します。
+
+GAS一覧の応答は配列のみ正常です。プロキシは配列以外(GASの`{ error }`、非JSON、非200)を
+HTTP 502 `{ "error": "Bad Gateway" }`で返し、キャッシュしません。
+
+GETに`fresh=1`を付けると、プロキシはNext.jsのキャッシュを使わずGASを直接読みます(認証・source検証は
+同様に先に行い、`fresh`はGASへのクエリにもキャッシュキーにも含めません)。書き込み完了後の再取得、
+書き込みと重なって破棄した取得の取り直し、手動の再取得(明細・固定費)で使用し、起動時の取得は使用しません。
+APIルートの`maxDuration`は60秒です(クライアントの書き込みタイムアウト45秒より長い)。
 
 ### POST actions
 
@@ -180,7 +194,9 @@ GASはJSONで`{ success: true, ... }`または`{ error: "..." }`を返します�
 全書き込みactionはScript Lock内で行を読み直して照合してから書き込みます。20秒以内に
 ロックを取得できない場合は何も変更せず`{ "error": "Busy" }`を返します(クライアントは失敗として扱う)。
 Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ以外は`expenses`タグを
-完了後に再検証します。
+完了後に再検証します(`revalidateTag(tag, { expire: 0 })`)。
+
+`deleteFixedCost`はUIから`id`と照合フィールド(type/name/amount/day/category)を送ります。
 
 ### 既知制約
 
@@ -225,7 +241,7 @@ LINE webhook形式のPOSTは、メール転送や家計簿更新をせず成功�
 | レイヤー | 方式 | 無効化 |
 | --- | --- | --- |
 | Browser | source別localStorage | `useExpenses.refresh()`とバックグラウンド取得で更新 |
-| Next.js | `expenses`タグ、1時間再検証 | POST完了後に`revalidateTag` |
+| Next.js | `unstable_cache`(`expenses`/`fixedCosts`タグ、クエリ別キー)、5分再検証。GASへの生fetchは`no-store`。`fresh=1`は迂回 | POST完了後に`revalidateTag(tag, { expire: 0 })` |
 | GAS | source・data/fixed別Script Cache、6時間 | GAS書き込み成功後に`clearCache(source)` |
 
 GAS Script Cacheはsourceごとの世代トークン`kakeibo_{main|yahoo}_gen`(data/fixed共通、
@@ -242,6 +258,13 @@ source省略・空文字は`main`)を持ち、一覧は`<key>_<gen>_chunks`(チ�
   (UIの再送による二重登録を防ぐ)、警告ログを残します。世代更新に失敗した場合は
   現世代のチャンクと旧形式キーの削除で代替します(これも失敗した場合は最大6時間古い一覧が残り得ます)。
 - 保存失敗はログのみで一覧取得は成功させます。
+
+Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外なら例外にします。`unstable_cache`は
+コールバックが正常に返った結果だけを保存するため、エラー応答はキャッシュに残りません
+(fetchキャッシュは200応答を非同期に保存し、後からの`revalidateTag`では確実に消せないため使わない)。
+書き込み前にGASを読み始めたGETが、POSTの`revalidateTag`より後に`unstable_cache`へ保存すると、
+その古い一覧は有効扱いのまま残り得ます。このため書き込み後の再取得は`fresh=1`でGASを直接読み
+(GAS側は世代トークンで古い一覧を返さない)、キャッシュの有効期間を5分に抑えています。
 
 書き込み機能を追加する場合、影響する全キャッシュの更新または無効化が必要です。
 
