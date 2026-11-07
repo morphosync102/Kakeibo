@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-react';
 import { Expense } from '@/lib/api';
 import { categoriesForType } from '@/lib/categories';
+import { postWrite } from '@/lib/write-queue';
 
 interface ExpenseDetailModalProps {
     isOpen: boolean;
@@ -25,8 +26,6 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
     const [selectedDate, setSelectedDate] = useState(expense ? toDateInputValue(expense.date) : '');
     const [selectedAmount, setSelectedAmount] = useState(expense ? String(expense.amount) : '');
     const [categoryScope, setCategoryScope] = useState<'single' | 'merchant'>('merchant');
-    const [isUpdatingDate, setIsUpdatingDate] = useState(false);
-    const [isUpdatingAmount, setIsUpdatingAmount] = useState(false);
     const [confirmingCategory, setConfirmingCategory] = useState(false);
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const dialogRef = useRef<HTMLDivElement>(null);
@@ -66,95 +65,79 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
         };
     }, [isOpen, expense]);
 
-    useEffect(() => {
-        if (!isOpen || !expense) return;
-        setSelectedCategory(expense.category || '未分類');
-        setSelectedDate(toDateInputValue(expense.date));
-        setSelectedAmount(String(expense.amount));
-        setCategoryScope('merchant');
-        setConfirmingCategory(false);
-        setConfirmingDelete(false);
-    }, [isOpen, expense]);
+    // Reset the form whenever the modal opens or shows another expense
+    // (adjusting state during render instead of in an effect)
+    const [syncedFor, setSyncedFor] = useState({ isOpen, expense });
+    if (syncedFor.isOpen !== isOpen || syncedFor.expense !== expense) {
+        setSyncedFor({ isOpen, expense });
+        if (isOpen && expense) {
+            setSelectedCategory(expense.category || '未分類');
+            setSelectedDate(toDateInputValue(expense.date));
+            setSelectedAmount(String(expense.amount));
+            setCategoryScope('merchant');
+            setConfirmingCategory(false);
+            setConfirmingDelete(false);
+        }
+    }
 
     if (!isOpen || !expense) return null;
 
-    const handleUpdateDate = async () => {
+    // Every edit is optimistic: apply locally and close right away, then send to
+    // GAS in the background through the serial write queue (a follow-up edit of
+    // the same row strict-matches on the values this write stores). Always
+    // refresh afterwards so the screen converges on the server state (restores
+    // the row if the write failed).
+    const sendInBackground = (payload: Record<string, unknown>, failureMessage: string) => {
+        postWrite({ source, ...payload })
+            .catch((e: unknown) => {
+                const reason = e instanceof Error ? e.message : '';
+                toast.error(reason ? `${failureMessage}: ${reason}` : failureMessage);
+            })
+            .finally(() => onUpdate());
+    };
+
+    const handleUpdateDate = () => {
         if (!selectedDate) {
             toast.error('日付を入力してください');
             return;
         }
 
         const newDate = selectedDate.replace(/-/g, '/');
-        setIsUpdatingDate(true);
-        try {
-            const res = await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'updateTransactionDate',
-                    source: source,
-                    id: expense.id,
-                    currentDate: expense.date,
-                    merchant: expense.merchant,
-                    amount: expense.amount,
-                    date: newDate
-                }),
-            });
-            const data = await res.json();
-            if (data.success) {
-                toast.success('日付を更新しました');
-                onLocalUpdate?.(expense, { date: newDate });
-                onUpdate();
-                onClose();
-            } else {
-                toast.error('更新に失敗しました: ' + (data.error || 'Unknown error'));
-            }
-        } catch {
-            toast.error('エラーが発生しました');
-        } finally {
-            setIsUpdatingDate(false);
-        }
+        onLocalUpdate?.(expense, { date: newDate });
+        toast.success('日付を更新しました');
+        onClose();
+
+        sendInBackground({
+            action: 'updateTransactionDate',
+            id: expense.id,
+            currentDate: expense.date,
+            merchant: expense.merchant,
+            amount: expense.amount,
+            date: newDate
+        }, '日付の更新に失敗しました');
     };
 
-    const handleUpdateAmount = async () => {
+    const handleUpdateAmount = () => {
         const amount = Number(selectedAmount);
         if (!selectedAmount || !isFinite(amount) || amount <= 0) {
             toast.error('正しい金額を入力してください');
             return;
         }
 
-        setIsUpdatingAmount(true);
-        try {
-            const res = await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'updateTransaction',
-                    source: source,
-                    id: expense.id,
-                    currentDate: expense.date,
-                    currentMerchant: expense.merchant,
-                    currentAmount: expense.amount,
-                    amount
-                }),
-            });
-            const data = await res.json();
-            if (data.success) {
-                toast.success('金額を更新しました');
-                onLocalUpdate?.(expense, { amount });
-                onUpdate();
-                onClose();
-            } else {
-                toast.error('更新に失敗しました: ' + (data.error || 'Unknown error'));
-            }
-        } catch {
-            toast.error('エラーが発生しました');
-        } finally {
-            setIsUpdatingAmount(false);
-        }
+        onLocalUpdate?.(expense, { amount });
+        toast.success('金額を更新しました');
+        onClose();
+
+        sendInBackground({
+            action: 'updateTransaction',
+            id: expense.id,
+            currentDate: expense.date,
+            currentMerchant: expense.merchant,
+            currentAmount: expense.amount,
+            amount
+        }, '金額の更新に失敗しました');
     };
 
-    // Optimistic: apply locally and close right away, reconcile in the background
     const handleUpdateCategory = () => {
         const category = selectedCategory;
 
@@ -164,30 +147,14 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             toast.success(`この明細のカテゴリを「${category}」に変更しました`);
             onClose();
 
-            fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'updateTransaction',
-                    source: source,
-                    id: expense.id,
-                    currentDate: expense.date,
-                    currentMerchant: expense.merchant,
-                    currentAmount: expense.amount,
-                    category
-                }),
-            })
-                .then(res => res.json())
-                .then(data => {
-                    if (!data.success) {
-                        toast.error('カテゴリの更新に失敗しました: ' + (data.error || 'Unknown error'));
-                    }
-                    onUpdate();
-                })
-                .catch(() => {
-                    toast.error('カテゴリの更新に失敗しました');
-                    onUpdate();
-                });
+            sendInBackground({
+                action: 'updateTransaction',
+                id: expense.id,
+                currentDate: expense.date,
+                currentMerchant: expense.merchant,
+                currentAmount: expense.amount,
+                category
+            }, 'カテゴリの更新に失敗しました');
             return;
         }
 
@@ -201,30 +168,13 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
         toast.success(`カテゴリを「${category}」に変更しました`);
         onClose();
 
-        fetch('/api/expenses', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                action: 'updateCategory',
-                source: source,
-                merchant: expense.merchant,
-                category
-            }),
-        })
-            .then(res => res.json())
-            .then(data => {
-                if (!data.success) {
-                    toast.error('カテゴリの更新に失敗しました: ' + (data.error || 'Unknown error'));
-                }
-                onUpdate();
-            })
-            .catch(() => {
-                toast.error('カテゴリの更新に失敗しました');
-                onUpdate();
-            });
+        sendInBackground({
+            action: 'updateCategory',
+            merchant: expense.merchant,
+            category
+        }, 'カテゴリの更新に失敗しました');
     };
 
-    // Optimistic: remove locally and close right away, reconcile in the background
     const handleDelete = () => {
         if (!confirmingDelete) {
             setConfirmingDelete(true);
@@ -235,30 +185,14 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
         toast.success('削除しました');
         onClose();
 
-        fetch('/api/expenses', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                action: 'deleteTransaction',
-                source: source,
-                id: expense.id,
-                // Extra fields for strict row matching (older GAS ignores them)
-                date: expense.date,
-                merchant: expense.merchant,
-                amount: expense.amount
-            }),
-        })
-            .then(res => res.json())
-            .then(data => {
-                if (!data.success) {
-                    toast.error('削除に失敗しました: ' + (data.error || 'Unknown error'));
-                    onUpdate();
-                }
-            })
-            .catch(() => {
-                toast.error('削除に失敗しました');
-                onUpdate();
-            });
+        sendInBackground({
+            action: 'deleteTransaction',
+            id: expense.id,
+            // Extra fields for strict row matching (older GAS ignores them)
+            date: expense.date,
+            merchant: expense.merchant,
+            amount: expense.amount
+        }, '削除に失敗しました');
     };
 
     return createPortal(
@@ -294,16 +228,16 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                         />
                         <button
                             onClick={handleUpdateDate}
-                            disabled={isUpdatingDate || selectedDate === toDateInputValue(expense.date)}
+                            disabled={selectedDate === toDateInputValue(expense.date)}
                             className={clsx(
                                 "w-full py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2 transition-all active:scale-[0.98]",
-                                isUpdatingDate || selectedDate === toDateInputValue(expense.date)
+                                selectedDate === toDateInputValue(expense.date)
                                     ? "bg-blue-300 dark:bg-blue-900/60"
                                     : "bg-blue-600 hover:bg-blue-700"
                             )}
                         >
                             <CalendarDays size={18} />
-                            {isUpdatingDate ? '更新中...' : '日付を保存'}
+                            日付を保存
                         </button>
                         <p className="text-xs text-gray-400">選択した明細1件の日付だけを変更します。</p>
                     </div>
@@ -323,16 +257,16 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                         </div>
                         <button
                             onClick={handleUpdateAmount}
-                            disabled={isUpdatingAmount || selectedAmount === String(expense.amount)}
+                            disabled={selectedAmount === String(expense.amount)}
                             className={clsx(
                                 "w-full py-3 rounded-xl font-bold text-white flex items-center justify-center gap-2 transition-all active:scale-[0.98]",
-                                isUpdatingAmount || selectedAmount === String(expense.amount)
+                                selectedAmount === String(expense.amount)
                                     ? "bg-blue-300 dark:bg-blue-900/60"
                                     : "bg-blue-600 hover:bg-blue-700"
                             )}
                         >
                             <JapaneseYen size={18} />
-                            {isUpdatingAmount ? '更新中...' : '金額を保存'}
+                            金額を保存
                         </button>
                         <p className="text-xs text-gray-400">選択した明細1件の金額だけを変更します。</p>
                     </div>

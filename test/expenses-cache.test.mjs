@@ -14,8 +14,11 @@ const apiSource = read('lib/api.ts');
 
 test('fixed costs are cached under their own tag instead of cache busting', () => {
   assert.match(routeSource, /'fixedCosts' : 'expenses'/);
-  assert.match(routeSource, /revalidateTag\('fixedCosts', 'max'\)/);
-  assert.match(routeSource, /revalidateTag\('expenses', 'max'\)/);
+  // Writes must expire immediately: 'max' is stale-while-revalidate and would
+  // serve pre-write data to the refetch that follows every edit.
+  assert.match(routeSource, /revalidateTag\('fixedCosts', \{ expire: 0 \}\)/);
+  assert.match(routeSource, /revalidateTag\('expenses', \{ expire: 0 \}\)/);
+  assert.doesNotMatch(routeSource, /revalidateTag\([^)]*'max'\)/);
   assert.doesNotMatch(manageSource, /t=\$\{Date\.now\(\)\}/);
 });
 
@@ -30,4 +33,15 @@ test('useExpenses exposes optimistic mutations and keeps cache on fetch failure'
 test('fetchExpenses surfaces failures instead of returning an empty list', () => {
   assert.match(apiSource, /throw new Error/);
   assert.doesNotMatch(apiSource, /return \[\]/);
+});
+
+test('fetch results are gated by local edits and pending writes', () => {
+  // Otherwise a slow background fetch (or one returning before a queued write
+  // lands) would roll back an optimistic edit
+  assert.match(hookSource, /mutationVersion/);
+  assert.match(hookSource, /shouldApplyFetch\(\{/);
+  assert.match(hookSource, /pendingWrites: getPendingWrites\(\)/);
+  // A discarded result is retried once the queue drains, so the screen converges
+  assert.match(hookSource, /subscribePendingWrites\(/);
+  assert.match(hookSource, /reloadAfterWrites\.current = true/);
 });

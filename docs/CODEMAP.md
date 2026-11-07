@@ -36,12 +36,13 @@
 
 | ファイル | 責務 |
 | --- | --- |
-| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新、`error` で失敗通知(失敗時もキャッシュ維持) |
+| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新(未完了の書き込み中・取得開始後の変更があった取得結果は破棄し、書き込み完了後に再取得)、`error` で失敗通知(失敗時もキャッシュ維持) |
 | `lib/api.ts` | `Expense` 型と `fetchExpenses()`(`/api/expenses` を叩き日付降順ソート。エラー時は throw) |
 | `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `lib/expense-analysis.ts` | 純粋関数：日付の厳密な正規化、期間集計・ゼロ補完・累積値、支出検索条件の検証・AND絞り込み・合計、カテゴリ候補 |
 | `middleware.ts` | セッションの署名・期限による画面・API保護。無効な場合、APIは401、画面は`/login?returnTo=`へ |
 | `lib/session.ts` | サーバー用Web Crypto HMAC-SHA256によるセッション発行・署名／期限／形式検証。乱数nonceと環境変数`SESSION_SECRET`を使用 |
+| `lib/write-queue.ts` | クライアント書き込みの直列化。`postWrite()` が `/api/expenses` への POST(`keepalive`)を1本の Promise チェーンで順に送る(失敗しても次を送る)。未完了数の購読/取得、取得結果を適用してよいかの判定 `shouldApplyFetch()` |
 | `gas/コード.js` | **GAS ソースの正本**(約900行、clasp で本番と同期)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
 | `gas/appsscript.json` | GAS マニフェスト(タイムゾーン・Web アプリ設定) |
 | `.github/workflows/deploy-gas.yml` | main への push(`gas/**` 変更時)で clasp push + 既存デプロイ ID へ deploy |

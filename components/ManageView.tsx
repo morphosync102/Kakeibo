@@ -1,12 +1,13 @@
 'use client';
 
 import BottomNav from '@/components/BottomNav';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
-import { PlusCircle, RefreshCw, Check, Loader2 } from 'lucide-react';
+import { PlusCircle, RefreshCw, Check } from 'lucide-react';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/lib/categories';
+import { postWrite } from '@/lib/write-queue';
 
 interface ManageViewProps {
     source?: string;
@@ -15,6 +16,12 @@ interface ManageViewProps {
 
 type TransactionType = 'Expense' | 'Income';
 type Categories = Record<TransactionType, string[]>;
+
+// The manual entry form is "empty" when nothing new has been typed into the
+// merchant/amount inputs since the last submit (type/date/category persist).
+function isEntryEmpty(form: { merchant: string; amount: string }) {
+    return form.merchant === '' && form.amount === '';
+}
 
 interface FixedCost {
     id: number;
@@ -29,7 +36,6 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
     const isYahoo = source === 'yahoo';
 
     const [activeTab, setActiveTab] = useState<'entry' | 'fixed'>('entry');
-    const [isSubmitting, setIsSubmitting] = useState(false);
     const [formData, setFormData] = useState({
         type: 'Expense',
         date: format(new Date(), 'yyyy-MM-dd'),
@@ -43,41 +49,49 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
         Income: INCOME_CATEGORIES
     };
 
-    const handleSubmit = async () => {
-        if (!formData.amount) {
-            toast.error('金額を入力してください');
+    // Latest form value and mount state, read when a background write fails
+    const formRef = useRef(formData);
+    const mountedRef = useRef(false);
+    useEffect(() => { formRef.current = formData; }, [formData]);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
+
+    // Optimistic: clear the form right away so the next entry can start and
+    // send in the background through the serial write queue. On failure the
+    // submitted values come back only if the inputs are still empty; a newer
+    // input (or an unmounted view) gets a toast naming the failed entry instead.
+    const handleSubmit = () => {
+        const amount = Number(formData.amount);
+        if (!formData.amount || !isFinite(amount) || amount <= 0) {
+            toast.error('正しい金額を入力してください');
             return;
         }
 
-        setIsSubmitting(true);
-        try {
-            const res = await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'addTransaction',
-                    date: formData.date.replace(/-/g, '/'), // Match YYYY/MM/DD format
-                    merchant: formData.merchant || (formData.type === 'Income' ? '手動入力(収入)' : '手動入力(支出)'),
-                    amount: formData.amount,
-                    category: formData.category,
-                    type: formData.type,
-                    source: source // Pass source context
-                })
-            });
+        const submitted = formData;
+        const merchant = submitted.merchant || (submitted.type === 'Income' ? '手動入力(収入)' : '手動入力(支出)');
+        setFormData(prev => ({ ...prev, merchant: '', amount: '' }));
+        toast.success('追加しました');
 
-            if (!res.ok) throw new Error('API Error');
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            // Reset form
-            setFormData(prev => ({ ...prev, merchant: '', amount: '' }));
-            toast.success('追加しました');
-        } catch (e) {
-            toast.error('追加に失敗しました');
+        postWrite({
+            action: 'addTransaction',
+            date: submitted.date.replace(/-/g, '/'), // Match YYYY/MM/DD format
+            merchant,
+            amount,
+            category: submitted.category,
+            type: submitted.type,
+            source: source // Pass source context
+        }).catch(e => {
             console.error(e);
-        } finally {
-            setIsSubmitting(false);
-        }
+            if (mountedRef.current && isEntryEmpty(formRef.current)) {
+                setFormData(submitted);
+                toast.error('追加に失敗しました。入力内容を戻しました');
+                return;
+            }
+            const describe = `${merchant} ¥${amount.toLocaleString()}`;
+            toast.error(`追加に失敗しました: ${describe}`);
+        });
     };
 
     const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-gray-50';
@@ -199,15 +213,13 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
 
                                 <button
                                     onClick={handleSubmit}
-                                    disabled={isSubmitting}
                                     className={clsx(
-                                        "w-full font-bold py-3.5 rounded-xl shadow-md transition-all flex justify-center items-center gap-2",
-                                        formData.type === 'Income' ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white",
-                                        isSubmitting && "opacity-70 cursor-not-allowed"
+                                        "w-full font-bold py-3.5 rounded-xl shadow-md transition-all flex justify-center items-center gap-2 active:scale-[0.98]",
+                                        formData.type === 'Income' ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white"
                                     )}
                                 >
-                                    {isSubmitting ? <Loader2 className="animate-spin" /> : <Check size={18} />}
-                                    <span>{isSubmitting ? '追加中...' : '追加する'}</span>
+                                    <Check size={18} />
+                                    <span>追加する</span>
                                 </button>
                             </div>
                         </section>
@@ -277,19 +289,15 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
 
     const handleAdd = async () => {
         if (!newItem.name || !newItem.amount) {
-            alert('名前と金額を入力してください');
+            toast.error('名前と金額を入力してください');
             return;
         }
         setIsAdding(true);
         try {
-            await fetch('/api/expenses', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    action: 'addFixedCost',
-                    source, // Pass source
-                    ...newItem
-                })
+            await postWrite({
+                action: 'addFixedCost',
+                source, // Pass source
+                ...newItem
             });
             setShowForm(false);
             setNewItem({ ...newItem, name: '', amount: '' });
@@ -313,20 +321,16 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
         setFixedCosts(previous.filter(f => f.id !== item.id));
         toast.success('削除しました');
 
-        fetch('/api/expenses', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                action: 'deleteFixedCost',
-                id: item.id,
-                source // Pass source
-            })
+        postWrite({
+            action: 'deleteFixedCost',
+            id: item.id,
+            source // Pass source
         })
-            .then(() => fetchFixedCosts())
             .catch(() => {
                 toast.error('削除に失敗しました');
                 setFixedCosts(previous);
-            });
+            })
+            .finally(() => fetchFixedCosts());
     };
 
     const cardBg = isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-gray-100";

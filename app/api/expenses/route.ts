@@ -50,11 +50,11 @@ export async function POST(request: Request) {
         if (!res.ok) throw new Error('Failed to post to GAS');
         const data = await res.json();
 
-        // Invalidate the cache that the completed write affects
+        // Expire immediately (not 'max' = stale-while-revalidate) so the refetch after a write sees it
         if (FIXED_COST_ACTIONS.includes(body.action)) {
-            revalidateTag('fixedCosts', 'max');
+            revalidateTag('fixedCosts', { expire: 0 });
         } else {
-            revalidateTag('expenses', 'max');
+            revalidateTag('expenses', { expire: 0 });
         }
 
         return NextResponse.json(data);

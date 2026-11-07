@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchExpenses, Expense } from '@/lib/api';
+import { getPendingWrites, shouldApplyFetch, subscribePendingWrites } from '@/lib/write-queue';
 
 const STORAGE_KEY = 'kakeibo_expenses_cache';
 
@@ -17,12 +18,54 @@ export function useExpenses(source?: string) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    // Bumped on every optimistic mutation. A fetch that started before the
+    // latest mutation carries pre-edit server data, so its result is dropped
+    // instead of rolling the edit back; the write's own refresh reconciles.
+    const mutationVersion = useRef(0);
+    // Set when a fetch result was dropped because writes were still queued;
+    // the list is fetched again once the write queue drains.
+    const reloadAfterWrites = useRef(false);
+
     const cacheKey = source ? `${STORAGE_KEY}_${source}` : STORAGE_KEY;
 
     const persist = useCallback((data: Expense[]) => {
         setExpensesState(data);
         localStorage.setItem(cacheKey, JSON.stringify(data));
     }, [cacheKey]);
+
+    // Fetch and apply unless a local mutation happened while it was in flight
+    // or a write is still pending (its result would temporarily roll it back)
+    const load = useCallback(async () => {
+        const startedAt = mutationVersion.current;
+        reloadAfterWrites.current = false;
+        const data = await fetchExpenses(source);
+        const apply = shouldApplyFetch({
+            startedVersion: startedAt,
+            currentVersion: mutationVersion.current,
+            pendingWrites: getPendingWrites(),
+        });
+        if (!apply) {
+            if (getPendingWrites() > 0) reloadAfterWrites.current = true;
+            return;
+        }
+        persist(data);
+        setError(null);
+    }, [source, persist]);
+
+    // Converge after the last queued write. The modal's onUpdate refresh
+    // normally does this (and clears the flag by starting a load); the
+    // deferred check only fires when no such refresh follows, e.g. for writes
+    // sent from another view.
+    useEffect(() => subscribePendingWrites(pending => {
+        if (pending !== 0 || !reloadAfterWrites.current) return;
+        setTimeout(() => {
+            if (!reloadAfterWrites.current) return;
+            load().catch(e => {
+                console.error(e);
+                setError('データの取得に失敗しました');
+            });
+        }, 0);
+    }), [load]);
 
     // Load from cache immediately on mount
     useEffect(() => {
@@ -40,9 +83,7 @@ export function useExpenses(source?: string) {
     const refresh = useCallback(async () => {
         setLoading(true); // Optional: show spinner if user manually triggered
         try {
-            const data = await fetchExpenses(source);
-            persist(data);
-            setError(null);
+            await load();
         } catch (error) {
             // Keep whatever is on screen (cache) instead of wiping it
             console.error('Failed to refresh data', error);
@@ -50,11 +91,12 @@ export function useExpenses(source?: string) {
         } finally {
             setLoading(false);
         }
-    }, [source, persist]);
+    }, [load]);
 
     // Optimistic mutations: update local state (and cache) immediately,
     // callers run refresh() in the background to reconcile with the server.
     const removeLocal = useCallback((target: Expense) => {
+        mutationVersion.current += 1;
         setExpensesState(previous => {
             const index = previous.findIndex(item => isSameExpense(item, target));
             if (index === -1) return previous;
@@ -65,6 +107,7 @@ export function useExpenses(source?: string) {
     }, [cacheKey]);
 
     const updateLocal = useCallback((target: Expense, changes: Partial<Expense>) => {
+        mutationVersion.current += 1;
         setExpensesState(previous => {
             const index = previous.findIndex(item => isSameExpense(item, target));
             if (index === -1) return previous;
@@ -82,15 +125,12 @@ export function useExpenses(source?: string) {
             refresh();
         } else {
             // Background update (silent refresh)
-            fetchExpenses(source).then(data => {
-                persist(data);
-                setError(null);
-            }).catch(e => {
+            load().catch(e => {
                 console.error(e);
                 setError('データの取得に失敗しました');
             });
         }
-    }, [refresh, cacheKey, source, persist]);
+    }, [refresh, load, cacheKey]);
 
     return { expenses, loading, error, refresh, removeLocal, updateLocal };
 }
