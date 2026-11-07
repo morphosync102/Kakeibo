@@ -1906,7 +1906,11 @@ const AUTH_ACTIONS = Object.freeze([
   'authRecordCredentialUse',
   'authListCredentials',
   'authRevokeCredential',
-  'authBumpEpoch'
+  'authBumpEpoch',
+  'authCreateLineLinkCode',
+  'authLinkLine',
+  'authGetLineLinkCandidate',
+  'authConfirmLineLink'
 ]);
 
 const INVITE_PURPOSES = Object.freeze(['register', 'recovery']);
@@ -2224,6 +2228,10 @@ function handleAuthAction(params) {
       case 'authListCredentials': return authListCredentials(params);
       case 'authRevokeCredential': return authRevokeCredential(params);
       case 'authBumpEpoch': return authBumpEpoch(params);
+      case 'authCreateLineLinkCode': return authCreateLineLinkCode(params);
+      case 'authLinkLine': return authLinkLine(params);
+      case 'authGetLineLinkCandidate': return authGetLineLinkCandidate(params);
+      case 'authConfirmLineLink': return authConfirmLineLink(params);
       default: return {error: 'Unknown action'};
     }
   } catch (err) {
@@ -2523,6 +2531,7 @@ function setupAuthSheets() {
     if (ensureAuthSheet(ss, AUTH_USERS_SHEET_NAME, AUTH_USERS_HEADERS)) created.push(AUTH_USERS_SHEET_NAME);
     if (ensureAuthSheet(ss, AUTH_CREDENTIALS_SHEET_NAME, AUTH_CREDENTIALS_HEADERS)) created.push(AUTH_CREDENTIALS_SHEET_NAME);
     if (ensureAuthSheet(ss, AUTH_INVITES_SHEET_NAME, AUTH_INVITES_HEADERS)) created.push(AUTH_INVITES_SHEET_NAME);
+    if (ensureAuthSheet(ss, AUTH_LINE_LINKS_SHEET_NAME, AUTH_LINE_LINKS_HEADERS)) created.push(AUTH_LINE_LINKS_SHEET_NAME);
 
     const users = requireAuthUsers();
     let adminUserId = null;
@@ -2722,4 +2731,341 @@ function createAdminRecoveryInvite() {
 
 function bumpAdminEpoch() {
   return bumpEpoch(requireSingleAdmin(requireAuthUsers()).userId);
+}
+
+// =====================================================================
+// --- Auth: LINE linking (design 2026-11-yuki-and-passkeys §5.4) ---
+// Sets the monthly report destination (SOURCES[source].lineKey) of the
+// user's own lineOptional source (yuki) to that user's LINE userId:
+// 1. authCreateLineLinkCode (actor): a one-time code, 10 unambiguous
+//    characters, valid 10 minutes, one per user (a new one replaces the old);
+//    the target source is fixed here, never by the webhook. Only its SHA-256
+//    is stored (Auth_LineLinks).
+// 2. authLinkLine (the Vercel webhook, after verifying X-Line-Signature):
+//    a code sent by a LINE user. Rate limited; a match only stores the LINE
+//    userId as a candidate (Script Cache, 10 minutes) — not a destination yet.
+// 3. authGetLineLinkCandidate (actor): the candidate's LINE display name (LINE
+//    profile API), shown to the user.
+// 4. authConfirmLineLink (actor, confirm | cancel): only the user's own
+//    confirmation writes the destination Script Property.
+// main / yahoo destinations can never be set: only lineOptional sources the
+// actor owns can be linked, checked at creation and again at confirmation.
+// The LINE userId is stored only in the destination property (and briefly in
+// the cache); the display name only goes to the response. Neither the code,
+// the LINE userId, the display name nor the token is ever logged.
+//
+// Failed matches are counted per LINE userId (not per code as the design's
+// first draft said): 3 failures within 10 minutes block that LINE user only.
+// Invalidating every valid code after 3 failures would let any friend of the
+// official account cancel Yuki's code with three wrong messages. A code has
+// 50 bits and the overall limit allows 20 attempts per 10 minutes, so guessing
+// a live code stays out of reach without invalidating codes.
+
+const AUTH_LINE_LINKS_SHEET_NAME = 'Auth_LineLinks';
+const AUTH_LINE_LINKS_HEADERS = Object.freeze(['linkId', 'userId', 'source', 'codeHash', 'status', 'expiresAt', 'candidateExpiresAt', 'createdAt', 'resolvedAt']);
+const LINE_LINK_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // 32 symbols, no 0 O 1 I l
+const LINE_LINK_CODE_LENGTH = 10; // 50 bits
+const LINE_LINK_CODE_PATTERN = /^[2-9A-HJ-NP-Z]{10}$/;
+const LINE_LINK_CODE_TTL_MS = 10 * 60 * 1000;
+const LINE_LINK_CANDIDATE_TTL_MS = 10 * 60 * 1000;
+const LINE_USER_ID_PATTERN = /^U[0-9a-f]{32}$/;
+const LINE_LINK_WINDOW_MS = 10 * 60 * 1000;
+const LINE_LINK_MAX_PER_USER = 5;
+const LINE_LINK_MAX_TOTAL = 20;
+const LINE_LINK_MAX_FAILURES = 3;
+const LINE_LINK_CACHE_PREFIX = 'kakeibo_line_';
+const LINE_LINK_DECISIONS = Object.freeze(['confirm', 'cancel']);
+
+function newLineLinkCode() {
+  const bytes = newRandomBytes(); // 32 bytes; 32 symbols = 5 bits per byte, no bias
+  let code = '';
+  for (let i = 0; i < LINE_LINK_CODE_LENGTH; i++) code += LINE_LINK_CODE_ALPHABET.charAt(((bytes[i] + 256) % 256) & 31);
+  return code;
+}
+
+function loadAuthLineLinks() {
+  try {
+    return readAuthTable(AUTH_LINE_LINKS_SHEET_NAME, AUTH_LINE_LINKS_HEADERS);
+  } catch (err) {
+    console.error(`${AUTH_LINE_LINKS_SHEET_NAME} could not be read: ${err.message}`);
+    return null;
+  }
+}
+
+function lineCandidateCacheKey(linkId) {
+  return `${LINE_LINK_CACHE_PREFIX}candidate_${linkId}`;
+}
+
+// Cache keys never contain the LINE userId itself
+function lineUserCacheKey(kind, lineUserId) {
+  return `${LINE_LINK_CACHE_PREFIX}${kind}_${sha256Hex(lineUserId).slice(0, 32)}`;
+}
+
+// Timestamps (ms) stored under `key` that are still inside the window
+function readRecentTimestamps(cache, key, now) {
+  let list = [];
+  try {
+    list = JSON.parse(cache.get(key) || '[]');
+  } catch (err) {
+    list = [];
+  }
+  if (!Array.isArray(list)) return [];
+  return list.filter(t => typeof t === 'number' && t > now - LINE_LINK_WINDOW_MS && t <= now);
+}
+
+function writeTimestamps(cache, key, list) {
+  cache.put(key, JSON.stringify(list), Math.ceil(LINE_LINK_WINDOW_MS / 1000) + 60);
+}
+
+// The actor's lineOptional sources (the destinations they may link)
+function getLinkableSources(user) {
+  return user.sources.filter(source => getSourceConfig(source).lineOptional);
+}
+
+function isLinkActive(links, row, now) {
+  const status = links.text(row, 'status');
+  if (status === 'pending') {
+    const expiresAt = toTimestamp(links.get(row, 'expiresAt'));
+    return expiresAt !== null && now < expiresAt;
+  }
+  if (status === 'candidate') {
+    const expiresAt = toTimestamp(links.get(row, 'candidateExpiresAt'));
+    return expiresAt !== null && now < expiresAt;
+  }
+  return false;
+}
+
+// The user's live link row (pending or candidate), or null
+function findActiveLink(links, userId, now) {
+  const rows = links.rows.filter(row => links.text(row, 'userId') === userId && isLinkActive(links, row, now));
+  return rows.length > 0 ? rows[rows.length - 1] : null;
+}
+
+function readLineCandidate(linkId) {
+  try {
+    const value = CacheService.getScriptCache().get(lineCandidateCacheKey(linkId));
+    return value && LINE_USER_ID_PATTERN.test(value) ? value : null;
+  } catch (err) {
+    console.warn(`LINE link candidate unavailable: ${err}`);
+    return null;
+  }
+}
+
+function dropLineCandidate(linkId) {
+  try {
+    CacheService.getScriptCache().remove(lineCandidateCacheKey(linkId));
+  } catch (err) {
+    console.warn(`LINE link candidate cleanup failed (expires by itself): ${err}`);
+  }
+}
+
+function authCreateLineLinkCode(params) {
+  if (params.source !== undefined && typeof params.source !== 'string') return {error: 'Invalid input'};
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const links = loadAuthLineLinks();
+    if (!links) return {error: 'AuthUnavailable'};
+    const actor = requireAuthActor(params, users);
+    if (actor.error) return actor;
+
+    const linkable = getLinkableSources(actor.user);
+    let source;
+    if (params.source !== undefined) {
+      if (linkable.indexOf(params.source) === -1) return {error: 'Forbidden'};
+      source = params.source;
+    } else {
+      if (linkable.length !== 1) return {error: 'Forbidden'};
+      source = linkable[0];
+    }
+
+    const now = new Date();
+    links.rows.forEach(row => {
+      const status = links.text(row, 'status');
+      if (links.text(row, 'userId') === actor.user.userId && (status === 'pending' || status === 'candidate')) {
+        links.set(row, 'status', 'replaced');
+        links.set(row, 'resolvedAt', now.toISOString());
+        dropLineCandidate(links.text(row, 'linkId'));
+      }
+    });
+    const code = newLineLinkCode();
+    const expiresAt = new Date(now.getTime() + LINE_LINK_CODE_TTL_MS).toISOString();
+    links.append({
+      linkId: newOpaqueId('l_'), userId: actor.user.userId, source: source, codeHash: sha256Hex(code),
+      status: 'pending', expiresAt: expiresAt, candidateExpiresAt: '', createdAt: now.toISOString(), resolvedAt: ''
+    });
+    console.log(`LINE link code issued for ${actor.user.userId} (${source})`);
+    return {success: true, code: code, source: source, expiresAt: expiresAt};
+  });
+}
+
+// From the Vercel webhook (signature already verified there): a LINE user
+// sent something shaped like a link code.
+function authLinkLine(params) {
+  const code = typeof params.code === 'string' ? params.code.trim().toUpperCase() : '';
+  const lineUserId = params.lineUserId;
+  if (!LINE_LINK_CODE_PATTERN.test(code) || typeof lineUserId !== 'string' || !LINE_USER_ID_PATTERN.test(lineUserId)) {
+    return {error: 'Invalid input'};
+  }
+  return runAuthWrite(() => {
+    const now = Date.now();
+    let cache;
+    const totalKey = `${LINE_LINK_CACHE_PREFIX}rate_all`;
+    const userKey = lineUserCacheKey('rate', lineUserId);
+    const failKey = lineUserCacheKey('fail', lineUserId);
+    let total;
+    let perUser;
+    let failures;
+    try {
+      cache = CacheService.getScriptCache();
+      total = readRecentTimestamps(cache, totalKey, now);
+      perUser = readRecentTimestamps(cache, userKey, now);
+      failures = readRecentTimestamps(cache, failKey, now);
+    } catch (err) {
+      // Without counters there is no rate limit: refuse (fail closed)
+      console.warn(`LINE link rate limit unavailable; attempt refused: ${err}`);
+      return {error: 'RateLimited'};
+    }
+    if (failures.length >= LINE_LINK_MAX_FAILURES || perUser.length >= LINE_LINK_MAX_PER_USER || total.length >= LINE_LINK_MAX_TOTAL) {
+      console.warn('LINE link attempt ignored: rate limit');
+      return {error: 'RateLimited'};
+    }
+    try {
+      writeTimestamps(cache, totalKey, total.concat([now]));
+      writeTimestamps(cache, userKey, perUser.concat([now]));
+    } catch (err) {
+      console.warn(`LINE link rate limit could not be recorded; attempt refused: ${err}`);
+      return {error: 'RateLimited'};
+    }
+
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const links = loadAuthLineLinks();
+    if (!links) return {error: 'AuthUnavailable'};
+    const codeHash = sha256Hex(code);
+    const rows = links.rows.filter(row =>
+      links.text(row, 'codeHash') === codeHash && links.text(row, 'status') === 'pending' && isLinkActive(links, row, now));
+    const owner = rows.length === 1 ? users.byId[links.text(rows[0], 'userId')] : null;
+    if (!owner || owner.status !== 'active') {
+      try {
+        writeTimestamps(cache, failKey, failures.concat([now]));
+      } catch (err) {
+        console.warn(`LINE link failure could not be recorded: ${err}`);
+      }
+      console.log('LINE link attempt did not match a live code');
+      return {error: 'LinkCodeInvalid'};
+    }
+
+    const row = rows[0];
+    const linkId = links.text(row, 'linkId');
+    try {
+      cache.put(lineCandidateCacheKey(linkId), lineUserId, Math.ceil(LINE_LINK_CANDIDATE_TTL_MS / 1000));
+    } catch (err) {
+      console.warn(`LINE link candidate could not be stored: ${err}`);
+      return {error: 'AuthError'};
+    }
+    links.set(row, 'status', 'candidate');
+    links.set(row, 'candidateExpiresAt', new Date(now + LINE_LINK_CANDIDATE_TTL_MS).toISOString());
+    console.log(`LINE link candidate held for ${owner.userId}; waiting for the user's confirmation`);
+    return {success: true};
+  });
+}
+
+// The LINE display name of a userId (profile API), or null. Logs only the
+// HTTP status.
+function fetchLineDisplayName(lineUserId) {
+  const token = getScriptPropertyOrThrow('LINE_CHANNEL_ACCESS_TOKEN');
+  let response;
+  try {
+    response = UrlFetchApp.fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(lineUserId)}`, {
+      method: 'get',
+      headers: {Authorization: `Bearer ${token}`},
+      muteHttpExceptions: true
+    });
+  } catch (err) {
+    // The exception message may contain the request URL (= LINE userId): log a fixed message only
+    console.warn('LINE profile API request failed');
+    return null;
+  }
+  const status = response.getResponseCode();
+  if (status !== 200) {
+    console.warn(`LINE profile API returned ${status}`);
+    return null;
+  }
+  try {
+    const body = JSON.parse(response.getContentText());
+    return typeof body.displayName === 'string' ? body.displayName : null;
+  } catch (err) {
+    console.warn('LINE profile API returned an unreadable body');
+    return null;
+  }
+}
+
+function authGetLineLinkCandidate(params) {
+  const users = loadAuthUsers();
+  if (users.error) return users;
+  const links = loadAuthLineLinks();
+  if (!links) return {error: 'AuthUnavailable'};
+  const actor = requireAuthActor(params, users);
+  if (actor.error) return actor;
+  const now = Date.now();
+  const row = findActiveLink(links, actor.user.userId, now);
+  if (!row) return {success: true, status: 'none'};
+  const source = links.text(row, 'source');
+  if (links.text(row, 'status') === 'pending') {
+    return {success: true, status: 'pending', source: source, expiresAt: links.text(row, 'expiresAt')};
+  }
+  const lineUserId = readLineCandidate(links.text(row, 'linkId'));
+  if (!lineUserId) return {success: true, status: 'none'};
+  const displayName = fetchLineDisplayName(lineUserId);
+  if (displayName === null) return {error: 'ProfileUnavailable'};
+  return {
+    success: true,
+    status: 'candidate',
+    source: source,
+    displayName: displayName,
+    expiresAt: links.text(row, 'candidateExpiresAt')
+  };
+}
+
+function authConfirmLineLink(params) {
+  if (LINE_LINK_DECISIONS.indexOf(params.decision) === -1) return {error: 'Invalid input'};
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const links = loadAuthLineLinks();
+    if (!links) return {error: 'AuthUnavailable'};
+    const actor = requireAuthActor(params, users);
+    if (actor.error) return actor;
+    const now = Date.now();
+    const row = findActiveLink(links, actor.user.userId, now);
+    if (!row || links.text(row, 'status') !== 'candidate') return {error: 'NoCandidate'};
+    const linkId = links.text(row, 'linkId');
+    const lineUserId = readLineCandidate(linkId);
+    if (!lineUserId) return {error: 'NoCandidate'};
+    // Re-check the destination: only a lineOptional source the actor owns
+    const source = links.text(row, 'source');
+    if (!isSourceId(source) || getLinkableSources(actor.user).indexOf(source) === -1) return {error: 'Forbidden'};
+
+    const resolvedAt = new Date(now).toISOString();
+    if (params.decision === 'cancel') {
+      links.set(row, 'status', 'cancelled');
+      links.set(row, 'resolvedAt', resolvedAt);
+      dropLineCandidate(linkId);
+      console.log(`LINE link cancelled by ${actor.user.userId}`);
+      return {success: true, decision: 'cancel'};
+    }
+
+    PropertiesService.getScriptProperties().setProperty(getSourceConfig(source).lineKey, lineUserId);
+    links.set(row, 'status', 'confirmed');
+    links.set(row, 'resolvedAt', resolvedAt);
+    dropLineCandidate(linkId);
+    console.log(`LINE destination of ${source} set by ${actor.user.userId}`);
+    try {
+      pushLineTextMessage(lineUserId, `家計簿(${getSourceConfig(source).label})の LINE 連携が完了しました。月次レポートをこのトークへ送ります。`);
+    } catch (err) {
+      console.warn('LINE link confirmation message could not be sent');
+    }
+    return {success: true, decision: 'confirm'};
+  });
 }

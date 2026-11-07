@@ -192,7 +192,7 @@ H列はUUID形式(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)の値だけをRowIdと
 | D | Day | 毎月の登録日 |
 | E | Category | カテゴリ |
 
-### 認証シート(Auth_Users / Auth_Credentials / Auth_Invites)
+### 認証シート(Auth_Users / Auth_Credentials / Auth_Invites / Auth_LineLinks)
 
 GASエディタの`setupAuthSheets()`が作成します(§4「認証API」の運用手順)。列は見出し名で特定するため順序は問いません。
 どのシートも、セルの値が`=` `+` `-` `@`で始まらないようにします(表示名・ラベルは入力時に拒否、生成値はその文字で始まらない)。
@@ -202,6 +202,7 @@ GASエディタの`setupAuthSheets()`が作成します(§4「認証API」の運
 | `Auth_Users` | userId, displayName, role, sources, homeSource, epoch, status, createdAt, updatedAt | userIdは`u_`+128ビット乱数(base64url)。roleは`admin`/`member`。sourcesはカンマ区切り。epochは0以上の整数。statusは`active`/`disabled` |
 | `Auth_Credentials` | credentialId, userId, publicKey, counter, transports, deviceType, backedUp, label, createdAt, lastUsedAt, revokedAt | credentialId・publicKey(COSE公開鍵)はbase64urlに接頭辞`b64u:`を付けて保存(`-`始まりの値を数式扱いさせないため)。counterは数値。transportsはカンマ区切り。revokedAtが空でなければ失効(行は削除しない) |
 | `Auth_Invites` | inviteId, tokenHash, userId, purpose, expiresAt, createdBy, usedAt | tokenHashは招待トークンのSHA-256(小文字16進64桁)。トークン自体は保存しない。purposeは`register`/`recovery`。usedAtが空でなければ使用済みまたは無効化済み |
+| `Auth_LineLinks` | linkId, userId, source, codeHash, status, expiresAt, candidateExpiresAt, createdAt, resolvedAt | LINE連携。codeHashは連携コードのSHA-256(16進)。statusは`pending`/`candidate`/`confirmed`/`cancelled`/`replaced`。LINE userId・表示名は保存しない(候補のLINE userIdはScript Cacheに10分だけ保持し、確定したら宛先Propertyにのみ保存) |
 
 日時はISO 8601文字列で書き込みます(シートが日時型に変換しても読めます)。
 
@@ -297,8 +298,32 @@ GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定
 | `authListCredentials` | 本人の有効なパスキー一覧(公開鍵なし) | actor | `{ success, credentials: [{ credentialId, label, deviceType, backedUp, createdAt, lastUsedAt }] }` | `SessionRevoked` |
 | `authRevokeCredential` | 本人のパスキー失効 + epoch+1 | actor, credentialId | `{ success, epoch }` | `SessionRevoked`、`CredentialNotFound`(他人のもの・失効済みを含む) |
 | `authBumpEpoch` | 本人の全端末ログアウト(epoch+1) | actor | `{ success, epoch }` | `SessionRevoked` |
+| `authCreateLineLinkCode` | LINE連携コードの発行(1人1つ、再発行で旧コード無効) | actor, source? | `{ success, code, source, expiresAt }`(codeはこの応答にだけ含まれる) | `Forbidden`(本人の`lineOptional`のsourceでない、または候補が1つに決まらない)、`SessionRevoked` |
+| `authLinkLine` | webhook(Vercelで署名検証済み)からのコード照合。成功しても候補として保留するだけ | code, lineUserId | `{ success }` | `LinkCodeInvalid`(存在しない・期限切れ・使用済み・置き換え済み)、`RateLimited` |
+| `authGetLineLinkCandidate` | 本人の連携状態と候補のLINE表示名 | actor | `{ success, status: "none" }` / `{ success, status: "pending", source, expiresAt }` / `{ success, status: "candidate", source, displayName, expiresAt }` | `ProfileUnavailable`、`SessionRevoked` |
+| `authConfirmLineLink` | 本人による確定または取り消し | actor, decision(`confirm`/`cancel`) | `{ success, decision }` | `NoCandidate`、`Forbidden`、`SessionRevoked` |
 
 共通エラー: `Unauthorized`、`Invalid input`、`Invalid actor`、`AuthUnavailable`(認証シートが無い・列が無い)、`Busy`、`AuthError`。
+
+#### LINE連携(宛先の設定)
+
+設計書§5.4。宛先にできるのは、本人が持つsourceのうちレジストリで`lineOptional`のもの(現状`yuki`のみ)だけです。
+`main`/`yahoo`の宛先(`LINE_DESTINATION_MAIN`/`LINE_DESTINATION_YAHOO`)はWebアクションからは設定できません
+(発行時と確定時の両方で確認)。
+
+- コード: 紛らわしい文字(`0 O 1 I l`)を除いた英大文字・数字32種の10文字(約50ビット)。GASが`newRandomBytes()`で生成し、
+  ハッシュだけを保存します。有効10分、1回限り。照合は前後の空白を除き大文字にしてから行います。
+- `authLinkLine`はScript Lock内で次の順に判定します。超過・ブロック中の試行は照合せず`RateLimited`です。
+  - そのLINE userIdの直近10分の照合失敗が3回以上(そのLINE userIdだけをブロック)
+  - そのLINE userIdの直近10分の試行が5回以上
+  - 全体の直近10分の試行が20回以上
+  - カウンタはScript Cache(キーはLINE userIdのハッシュ)。Cacheが使えないときは拒否します。
+- 照合に成功すると、LINE userIdを候補としてScript Cacheに10分保持し、Auth_LineLinksを`candidate`にします。宛先Propertyはまだ変わりません。
+- 本人が`authGetLineLinkCandidate`で表示名(LINEプロフィールAPI、`LINE_CHANNEL_ACCESS_TOKEN`使用)を確認し、`authConfirmLineLink`で
+  `confirm`したときだけ宛先Property(`LINE_DESTINATION_YUKI`)を設定し、確認メッセージをpushします。`cancel`は候補とコードを破棄します。
+- 失敗回数は(設計書の初版の「コードごと・3回で全コード失効」ではなく)LINE userIdごとに数えます。初版の方式では、公式アカウントの
+  友だちなら誰でも誤ったコードを3回送るだけでYukiのコードを失効させられるためです。総当たりは50ビットのコードと全体20回/10分の制限で防ぎます。
+- ログ・シート・応答に、連携コード(発行応答を除く)・LINE userId・表示名(候補取得の応答を除く)・トークンを出しません。
 
 - 招待: 有効期限は24時間(管理者の`recovery`招待は10分)。1回限りで、消費はロック内で未使用・期限・利用者を再確認します。
   同じ利用者に新しい招待を発行すると、その利用者の未使用の招待はすべて無効になります。
@@ -505,7 +530,8 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
-- `LINE_DESTINATION_YUKI`: Yuki の月次レポート宛先(LINE userId)。任意。未設定の間は yuki の月次レポートを送らない
+- `LINE_DESTINATION_YUKI`: Yuki の月次レポート宛先(LINE userId)。任意。未設定の間は yuki の月次レポートを送らない。
+  通常は手で設定せず、Yuki 本人の LINE 連携(`authConfirmLineLink`)で設定される
   (値の設定方法は設計書 §5.4 の LINE 連携。G4 で実装予定)
 - `AUTHZ_ENFORCE`: `1`で全データ要求にactorを必須にする(未設定・`1`以外は移行期間: actor無しのmain/yahooを許可)。秘密値ではない
 - `AUTH_PROXY_SECRET`: 認証系アクションとactor付き要求の`authKey`を照合する共有シークレット。`PROXY_SECRET`とは別の値にし、

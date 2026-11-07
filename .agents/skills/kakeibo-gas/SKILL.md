@@ -95,6 +95,12 @@ Contract and error codes: `docs/SPECIFICATION.md` §4 「認証API」. Rules whe
   base64url values with the `b64u:` prefix (`toSheetBase64Url`).
 - Random values come from `newRandomBytes()` (SHA-256 over 4 UUIDs + time + Math.random), because
   `Utilities.getUuid()` is not documented as cryptographically secure.
+- LINE linking (`authCreateLineLinkCode` / `authLinkLine` / `authGetLineLinkCandidate` / `authConfirmLineLink`,
+  sheet `Auth_LineLinks`): only a `lineOptional` source the actor owns can be linked (checked at code creation
+  and again at confirmation), so main / yahoo destinations can never be set from the Web. Only the user's
+  `confirm` writes the destination property. Failures are counted per LINE userId (3 in 10 min blocks that
+  LINE user only); rate limits 5 per LINE user and 20 overall per 10 min (Script Cache, fail closed). Never
+  log or store the code, LINE userId (cache keys use its hash), display name or channel token.
 
 ## Spreadsheet
 
@@ -179,7 +185,8 @@ Never insert columns before H: code depends on column numbers (G = Type).
 - POST `deleteFixedCost`
 - POST auth actions (no source): `authGetAdminUser`, `authPeekInvite`, `authConsumeInviteAndAddCredential`,
   `authAddCredential`, `authGetCredential`, `authRecordCredentialUse`, `authListCredentials`,
-  `authRevokeCredential`, `authBumpEpoch` (see Auth)
+  `authRevokeCredential`, `authBumpEpoch`, `authCreateLineLinkCode`, `authLinkLine`,
+  `authGetLineLinkCandidate`, `authConfirmLineLink` (see Auth)
 
 When adding or changing an action, update the caller, GAS implementation, tests, and
 `docs/SPECIFICATION.md` together.

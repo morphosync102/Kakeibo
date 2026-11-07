@@ -498,6 +498,14 @@ GAS の doPost は HTTP ヘッダを読めず `X-Line-Signature` を検証でき
    違う場合は「取り消し」で候補とコードを破棄する。確定後に確認メッセージを push する。
    - 表示名は画面表示のみに使い、シート・ログには保存しない(lineUserId は宛先 Property にのみ保存)。
 
+実装時の決定(G4):
+- **コードは GAS が生成する**(`authCreateLineLinkCode` の応答で一度だけ返し、シートにはハッシュのみ)。招待トークンと同じ乱数源
+  (`newRandomBytes`)を使え、コードの書式・長さを GAS の VM テストで保証できるため。呼び出しは `authKey` 付きの `/api/auth/line-link` に限られる。
+- **失敗回数は LINE userId ごとに数える**(上記 3. の「全コード失効」は採らない): 全コード失効方式では、公式アカウントの友だちなら誰でも
+  誤ったコードを3回送るだけで Yuki のコードを失効させられる(連携の妨害)。LINE userId ごとに 10 分で 3 回失敗したらその userId だけを
+  ブロックし、総当たりは 50 ビットのコードと全体 20 回/10 分の制限で防ぐ(有効期間 10 分の間に当たる確率は無視できる)。
+- 候補(lineUserId)はシートではなく Script Cache に保持する(照合から 10 分)。確定時に発行時と同じ条件(本人の `lineOptional` の source)を再確認する。
+
 ### 5.5 `updateCategory` の扱い
 
 現状: `updateCategory` は要求 source に関係なく **main と yahoo の両方**の Data を店舗名一致で書き換え、両方の Config に
@@ -548,7 +556,7 @@ GAS の doPost は HTTP ヘッダを読めず `X-Line-Signature` を検証でき
 | `authListCredentials` | 本人のパスキー一覧 | 本人画面 | actor |
 | `authRevokeCredential` | 本人のパスキー失効 + epoch+1 | 本人画面 | actor, credentialId |
 | `authBumpEpoch` | 本人の全端末ログアウト | 本人画面 | actor |
-| `authCreateLineLinkCode` / `authLinkLine` / `authGetLineLinkCandidate` / `authConfirmLineLink` | LINE 連携(§5.4) | 本人 / webhook | actor, codeHash / code, lineUserId / actor, decision |
+| `authCreateLineLinkCode` / `authLinkLine` / `authGetLineLinkCandidate` / `authConfirmLineLink` | LINE 連携(§5.4) | 本人 / webhook | actor, [source](コードは GAS が生成して返す、§5.4 実装時の決定) / code, lineUserId / actor / actor, decision |
 
 Web アプリから呼べるのは上表のみで、**すべて本人(actor)に対する操作か、未ログイン時のログイン・登録用**である。
 他人に対する操作(招待発行・他人のパスキー失効・他人の epoch 更新・ユーザー追加/無効化)は Web アクションとして公開せず、
@@ -722,7 +730,9 @@ SPECIFICATION §8 は「GAS 変更と UI 変更は同じ push に含めてかま
   `key` は `authKey` として扱われないこと(setup で警告)、ログに `authKey` が出ないこと。
 - 固定費: yuki の固定費 ID に `_yuki` が付く、ある source のロック失敗でも他 source が処理される。
 - 月次レポート: `LINE_DESTINATION_YUKI` 未設定でもスキップして他 source は送信、宛先キーの対応、main の例外で yahoo が止まらない。
-- LINE 連携: コードの1回限り・期限・source 固定、ハッシュ不一致の拒否、失敗3回で有効コード失効、userId ごと・全体のレート制限、確定前は宛先 Property が変わらないこと、取り消しで候補破棄。
+- LINE 連携: コードの書式(紛らわしい文字なし10文字)・1回限り・期限・1人1つ・source 固定、ハッシュ不一致の拒否、
+  失敗3回でその LINE userId をブロック(本人のコードは有効のまま)、userId ごと・全体のレート制限、確定前は宛先 Property が変わらないこと、
+  取り消しで候補破棄、main / yahoo の宛先を設定できないこと(発行時・改ざんされた行での確定時)、ログ・シートにコード・LINE userId・表示名・トークンが出ないこと。
 - チャレンジ再利用: 同じ challengeHash の2回目が `ChallengeReused`。
 - Next.js / GAS の source レジストリ一致検査。
 
@@ -936,7 +946,7 @@ push の分け方(§7.2): このリリースは SPECIFICATION §8 の「GAS と 
 | G1 | source レジストリ化(`SOURCES`、`normalizeSource`、`getTargetSheets`・`getCacheSourceKey`・LINE 宛先/ラベルの既定値廃止、`backfillRowIds`、固定費・月次レポートのループと source ごとの try/catch)、`yuki` 追加、`setupSourceSheets`。VM テスト追加。SPECIFICATION のデータソース表・Script Properties 更新 | M |
 | G2 | `actor` 照合(Script Cache 上のユーザー表、epoch、`AUTHZ_ENFORCE`、yuki は actor 必須)、`updateCategory` の共有グループ ∩ 利用者 sources 化(Yuki の main 変更は `Data`・`Config` のみ)。VM テスト。SPECIFICATION の API 契約・認証節 | M |
 | G3 | 認証系(`Auth_*` シート、`authGetAdminUser`、招待の原子的消費、パスキー取得・記録・追加・失効、チャレンジ再利用記録、epoch)と GAS エディタ関数(`setupAuthSheets` / `addUser` / `disableUser` / `createInvite` / `revokeCredential` / `bumpEpoch` / `listUsers`)。`PROXY_SECRET` 未設定時の拒否。VM テスト | L |
-| G4 | LINE 連携(`authCreateLineLinkCode` / `authLinkLine` / `authGetLineLinkCandidate` / `authConfirmLineLink`、失敗3回失効、userId ごと・全体のレート制限、プロフィール API、`LINE_DESTINATION_YUKI` の設定)。VM テスト | M |
+| G4 | LINE 連携(`authCreateLineLinkCode` / `authLinkLine` / `authGetLineLinkCandidate` / `authConfirmLineLink`、LINE userId ごとの失敗3回ブロック(§5.4 実装時の決定)、userId ごと・全体のレート制限、プロフィール API、`LINE_DESTINATION_YUKI` の設定)。VM テスト | M |
 
 ### push 2: UI コミット(push 1 のデプロイ確認と `setupAuthSheets()` 実行の後)
 
