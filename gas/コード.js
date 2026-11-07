@@ -32,10 +32,10 @@ const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
 //   skipped with a warning (yuki before LINE linking). Otherwise an unset
 //   destination is an error, so the trigger run is reported as failed.
 // - requiresActor: the Web App (doGet/doPost) serves this source only to a
-//   request carrying a verified user (`actor`, added in G2 of
-//   docs/design/2026-11-yuki-and-passkeys.md). Until that verification exists
-//   such a source is refused with {error: 'Forbidden'}; the current UI never
-//   sends it. Time-driven functions and editor functions are not affected.
+//   request carrying a verified user (`actor`, see authorizeDataRequest), even
+//   while AUTHZ_ENFORCE is unset; without one it answers {error: 'Forbidden'}.
+//   The current UI never sends it. Time-driven and editor functions are not
+//   affected.
 const SOURCES = Object.freeze({
   main: Object.freeze({
     data: DATA_SHEET_NAME, config: CONFIG_SHEET_NAME, fixed: FIXED_SHEET_NAME,
@@ -51,6 +51,38 @@ const SOURCES = Object.freeze({
   })
 });
 const SOURCE_IDS = Object.freeze(Object.keys(SOURCES)); // processing order of the loops
+
+// updateCategory rewrites the same merchant across the group of the requested
+// source, limited to the sources the caller (actor) may use. Every source
+// belongs to exactly one group; a new user's source gets a group of its own.
+const CATEGORY_GROUPS = Object.freeze([
+  Object.freeze(['main', 'yahoo']),
+  Object.freeze(['yuki'])
+]);
+
+// --- User table (actor verification) ---
+// Auth_Users is created and maintained by the auth functions (G3:
+// setupAuthSheets / addUser / disableUser / bumpEpoch ...). This file only
+// reads it. Columns are located by header name (AUTH_USERS_HEADERS is the
+// layout G3 writes); only userId / sources / epoch / status are used here.
+// - userId: opaque id (u_ + base64url); the proxy sends it as actorUserId.
+// - sources: registry ids separated by commas (e.g. "yuki,main").
+// - epoch: non-negative integer; the session carries it as actorEpoch and a
+//   mismatch means the session was revoked.
+// - status: only "active" users are accepted.
+// The parsed table is kept in the Script Cache under a generation token
+// (AUTH_USERS_GEN_KEY; table at AUTH_USERS_CACHE_KEY_<gen>, short TTL), see
+// getAuthUsers. Every write to Auth_Users must call clearAuthUsersCache()
+// before releasing the script lock, so the change applies to the next
+// request; after editing the sheet by hand, run clearAuthUsersCache() from
+// the editor (or wait AUTH_USERS_CACHE_TTL seconds).
+const AUTH_USERS_SHEET_NAME = 'Auth_Users';
+const AUTH_USERS_HEADERS = Object.freeze(['userId', 'displayName', 'role', 'sources', 'homeSource', 'epoch', 'status', 'createdAt', 'updatedAt']);
+const AUTH_USERS_GEN_KEY = 'kakeibo_auth_users_gen';
+const AUTH_USERS_CACHE_KEY = 'kakeibo_auth_users_v1';
+const AUTH_USERS_CACHE_TTL = 600; // seconds
+const ACTOR_USER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_ACTOR_EPOCH = 1000000000;
 
 // Headers written by setupSourceSheets(); the same columns as the existing
 // main / yahoo sheets (Data column H = RowId, see ROW_ID_COLUMN below).
@@ -98,6 +130,12 @@ function isAuthorizedRequest(key) {
   return constantTimeEquals(key, secret);
 }
 
+// True when PROXY_SECRET is set, i.e. a request that passed
+// isAuthorizedRequest really came from the proxy. Only then is `actor` trusted.
+function isProxySecretConfigured() {
+  return Boolean(PropertiesService.getScriptProperties().getProperty('PROXY_SECRET'));
+}
+
 // Compares SHA-256 digests of both values over all 32 bytes, so the time taken
 // does not depend on where (or whether) the inputs differ, nor on their length.
 function constantTimeEquals(a, b) {
@@ -133,11 +171,227 @@ function getSourceConfig(source) {
   return SOURCES[source];
 }
 
-// Web App gate for a normalized source (see SOURCES.requiresActor). Returns
-// null when the request may proceed, otherwise the error response object.
-function checkWebAppSourceAccess(source) {
-  if (getSourceConfig(source).requiresActor) return {error: 'Forbidden'};
-  return null;
+// --- Helper: actor verification (design 2026-11-yuki-and-passkeys §5.7) ---
+// The proxy adds actorUserId / actorEpoch (from the verified session) to every
+// data request after removing any client-sent values. Called after
+// isAuthorizedRequest and normalizeSource, before any sheet is read or written.
+// Returns {actor: null} (legacy request without actor, allowed),
+// {actor: {userId, epoch, sources}} or {error}:
+// - malformed actor (only one field, bad id or epoch)  -> 'Invalid actor'
+// - no actor, and the source requiresActor or Script Property
+//   AUTHZ_ENFORCE is '1'                                -> 'Forbidden'
+// - actor while PROXY_SECRET is unset (cannot be trusted) -> 'Unauthorized'
+// - Auth_Users missing / unreadable (fail closed)      -> 'AuthUnavailable'
+// - unknown user, status not active, epoch mismatch    -> 'SessionRevoked'
+// - source not in the user's sources                   -> 'Forbidden'
+function authorizeDataRequest(params, source) {
+  const parsed = readActorParams(params);
+  if (parsed.error) return {error: parsed.error};
+  if (!parsed.actor) {
+    if (getSourceConfig(source).requiresActor || isAuthzEnforced()) return {error: 'Forbidden'};
+    return {actor: null};
+  }
+  if (!isProxySecretConfigured()) return {error: 'Unauthorized'};
+
+  const table = getAuthUsers();
+  if (table.error) return {error: table.error};
+  const user = Object.prototype.hasOwnProperty.call(table.users, parsed.actor.userId)
+    ? table.users[parsed.actor.userId]
+    : null;
+  if (!user || user.status !== 'active' || user.epoch !== parsed.actor.epoch) return {error: 'SessionRevoked'};
+  if (user.sources.indexOf(source) === -1) return {error: 'Forbidden'};
+  return {actor: {userId: parsed.actor.userId, epoch: user.epoch, sources: user.sources.slice()}};
+}
+
+// AUTHZ_ENFORCE = '1': every data request must carry an actor.
+// Unset (migration period): requests without actor keep working for main / yahoo.
+function isAuthzEnforced() {
+  return PropertiesService.getScriptProperties().getProperty('AUTHZ_ENFORCE') === '1';
+}
+
+// Reads actorUserId / actorEpoch from a doGet query (strings) or doPost body.
+// Returns {actor: null} when neither is sent, {actor: {userId, epoch}} or {error}.
+function readActorParams(params) {
+  const isAbsent = value => value === undefined || value === null || value === '';
+  const userId = params.actorUserId;
+  const epochValue = params.actorEpoch;
+  if (isAbsent(userId) && isAbsent(epochValue)) return {actor: null};
+  if (typeof userId !== 'string' || !ACTOR_USER_ID_PATTERN.test(userId)) return {error: 'Invalid actor'};
+  const epoch = parseEpoch(epochValue);
+  if (epoch === null) return {error: 'Invalid actor'};
+  return {actor: {userId: userId, epoch: epoch}};
+}
+
+// A non-negative integer (number, or a string of digits), or null
+function parseEpoch(value) {
+  let number = null;
+  if (typeof value === 'number') number = value;
+  else if (typeof value === 'string' && /^\d{1,10}$/.test(value)) number = Number(value);
+  if (number === null || !Number.isInteger(number) || number < 0 || number > MAX_ACTOR_EPOCH) return null;
+  return number;
+}
+
+// The user table as {users: {userId: {epoch, sources, status}}} or {error}.
+// Cached like the data lists, under a generation token
+// (AUTH_USERS_GEN_KEY -> gen, AUTH_USERS_CACHE_KEY_<gen> -> table):
+// - the generation is read (or created) BEFORE the sheet is read, and the
+//   table is stored only if the generation is still the same right before
+//   the put. clearAuthUsersCache() flushes pending sheet writes and then
+//   rotates the generation, so a read that started before an Auth_Users write
+//   can never store the old table under the live generation.
+// - a cache hit for the live generation does not open the sheet.
+// - without a cache (service failure) the sheet is read and nothing is stored.
+function getAuthUsers() {
+  let cache = null;
+  let gen = null;
+  try {
+    cache = CacheService.getScriptCache();
+    gen = cache.get(AUTH_USERS_GEN_KEY);
+    if (!gen) {
+      gen = newCacheGen();
+      cache.put(AUTH_USERS_GEN_KEY, gen, CACHE_TTL);
+    }
+    const cached = cache.get(getAuthUsersTableKey(gen));
+    if (cached) return {users: JSON.parse(cached)};
+  } catch (err) {
+    console.warn(`Auth user cache read failed: ${err}`);
+    gen = null;
+  }
+
+  let users;
+  try {
+    const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(AUTH_USERS_SHEET_NAME);
+    if (!sheet) {
+      console.error(`${AUTH_USERS_SHEET_NAME} does not exist: requests with an actor are refused (run setupAuthSheets).`);
+      return {error: 'AuthUnavailable'};
+    }
+    users = parseAuthUsers(sheet.getDataRange().getValues());
+  } catch (err) {
+    console.error(`${AUTH_USERS_SHEET_NAME} could not be read: ${err}`);
+    return {error: 'AuthUnavailable'};
+  }
+  if (!users) return {error: 'AuthUnavailable'};
+
+  if (cache && gen) {
+    try {
+      if (cache.get(AUTH_USERS_GEN_KEY) === gen) {
+        cache.put(getAuthUsersTableKey(gen), JSON.stringify(users), AUTH_USERS_CACHE_TTL);
+      } else {
+        console.log('Skip caching the user table: generation changed during read');
+      }
+    } catch (err) {
+      console.warn(`Auth user cache write failed: ${err}`);
+    }
+  }
+  return {users: users};
+}
+
+function getAuthUsersTableKey(gen) {
+  return `${AUTH_USERS_CACHE_KEY}_${gen}`;
+}
+
+// Parses Auth_Users values (header row first). Returns the users object, or
+// null when a required column is missing. A userId that appears on more than
+// one row (valid or not) is left out entirely (fail closed); rows with an
+// invalid userId or epoch are left out (such a user is treated as unknown).
+// Never logs cell values.
+function parseAuthUsers(values) {
+  if (!values || values.length === 0) return null;
+  const header = values[0].map(cell => String(cell).trim());
+  const column = {};
+  for (const name of ['userId', 'sources', 'epoch', 'status']) {
+    column[name] = header.indexOf(name);
+    if (column[name] === -1) {
+      console.error(`${AUTH_USERS_SHEET_NAME}: column "${name}" is missing.`);
+      return null;
+    }
+  }
+  // No prototype: a userId such as "__proto__" stays an ordinary key
+  const users = Object.create(null);
+  const rowCount = Object.create(null);
+  const rows = values.slice(1).map(row => ({row: row, userId: String(row[column.userId]).trim()}));
+  rows.forEach(entry => {
+    if (entry.userId !== '') rowCount[entry.userId] = (rowCount[entry.userId] || 0) + 1;
+  });
+  let skipped = 0;
+  rows.forEach(entry => {
+    const userId = entry.userId;
+    if (userId === '' || rowCount[userId] > 1) return;
+    const row = entry.row;
+    const epoch = parseEpoch(typeof row[column.epoch] === 'number' ? row[column.epoch] : String(row[column.epoch]).trim());
+    if (!ACTOR_USER_ID_PATTERN.test(userId) || epoch === null) {
+      skipped++;
+      return;
+    }
+    users[userId] = {
+      epoch: epoch,
+      sources: String(row[column.sources]).split(',').map(s => s.trim()).filter(isSourceId),
+      status: String(row[column.status]).trim()
+    };
+  });
+  const duplicates = Object.keys(rowCount).filter(userId => rowCount[userId] > 1).length;
+  if (skipped > 0 || duplicates > 0) {
+    console.warn(`${AUTH_USERS_SHEET_NAME}: ${skipped} invalid row(s) and ${duplicates} duplicated userId(s) ignored.`);
+  }
+  return users;
+}
+
+// Invalidates the cached user table. Call after every Auth_Users write (G3
+// functions, still holding the script lock) or run it from the editor after
+// editing the sheet by hand. Same scheme as clearCache(source):
+// 1. flush: commit pending Auth_Users writes first, otherwise a reader could
+//    take the new generation, read the old sheet and cache the old table.
+// 2. rotate the generation (the old table becomes unreachable).
+// 3. remove the previous generation's table: housekeeping when the rotation
+//    worked, the fallback when it failed.
+// Never throws (the auth write already landed). Returns true when rotated.
+function clearAuthUsersCache() {
+  try {
+    SpreadsheetApp.flush();
+  } catch (err) {
+    console.warn(`Flush before user table invalidation failed: ${err}`);
+  }
+
+  let cache;
+  try {
+    cache = CacheService.getScriptCache();
+  } catch (err) {
+    console.warn(`User table invalidation failed (expires within ${AUTH_USERS_CACHE_TTL}s): ${err}`);
+    return false;
+  }
+
+  let previousGen = null;
+  try {
+    previousGen = cache.get(AUTH_USERS_GEN_KEY);
+  } catch (err) {
+    console.warn(`User table generation read failed: ${err}`);
+  }
+
+  let rotated = false;
+  try {
+    cache.put(AUTH_USERS_GEN_KEY, newCacheGen(), CACHE_TTL);
+    rotated = true;
+  } catch (err) {
+    console.warn(`User table generation rotation failed; removing the current table instead: ${err}`);
+  }
+
+  if (previousGen) {
+    try {
+      cache.remove(getAuthUsersTableKey(previousGen));
+    } catch (err) {
+      console.warn(`User table cleanup failed${rotated ? '' : ` (the table may stay stale for up to ${AUTH_USERS_CACHE_TTL}s)`}: ${err}`);
+    }
+  }
+  return rotated;
+}
+
+// The sources updateCategory writes for a request on `source`: the source's
+// category group, limited to the actor's sources (actor null = legacy request
+// without actor: the whole group, i.e. main + yahoo as before).
+function getCategoryUpdateSources(source, actor) {
+  const group = CATEGORY_GROUPS.filter(g => g.indexOf(source) !== -1)[0];
+  if (!group) throw new Error(`No category group for source: ${source}`);
+  return group.filter(src => !actor || actor.sources.indexOf(src) !== -1);
 }
 
 // --- Helper: RowId ---
@@ -450,8 +704,8 @@ function doGet(e) {
   if (action === 'version') return responseJSON({build: GAS_BUILD});
   const source = normalizeSource(e.parameter.source); // a SOURCES id | null
   if (!source) return responseJSON({error: 'Invalid source'});
-  const denied = checkWebAppSourceAccess(source);
-  if (denied) return responseJSON(denied);
+  const authz = authorizeDataRequest(e.parameter, source);
+  if (authz.error) return responseJSON({error: authz.error});
 
   if (action === 'getFixedCosts') {
     return getFixedCostsWithCache(source);
@@ -562,8 +816,8 @@ function doPost(e) {
 
     const source = normalizeSource(params.source); // a SOURCES id | null
     if (!source) return responseJSON({error: 'Invalid source'});
-    const denied = checkWebAppSourceAccess(source);
-    if (denied) return responseJSON(denied);
+    const authz = authorizeDataRequest(params, source);
+    if (authz.error) return responseJSON({error: authz.error});
 
     if (WRITE_ACTIONS.indexOf(params.action) === -1) {
       return responseJSON({error: 'Unknown action'});
@@ -572,7 +826,7 @@ function doPost(e) {
     // Rows are (re)read and matched inside the lock, so a concurrent write
     // cannot shift row numbers between the read and the write.
     const result = runWithScriptLock(
-      () => handleWriteAction(params, source),
+      () => handleWriteAction(params, source, authz.actor),
       () => ({error: 'Busy'})
     );
     return responseJSON(result);
@@ -583,7 +837,9 @@ function doPost(e) {
 }
 
 // Must be called while holding the script lock. Returns the response object.
-function handleWriteAction(params, source) {
+// `actor` is the verified user from authorizeDataRequest, or null (legacy
+// request without actor); only updateCategory depends on it.
+function handleWriteAction(params, source, actor) {
     const action = params.action;
     const sheets = getTargetSheets(source);
     const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -758,10 +1014,11 @@ function handleWriteAction(params, source) {
     }
 
     else if (action === 'updateCategory') {
-      // Update BOTH Main and Yahoo sheets (the household/personal pair; yuki is
-      // never reached here: the Web App refuses it until G2 limits this action
-      // to the caller's category-sharing group)
-      ['main', 'yahoo'].forEach(src => {
+      // The category group of `source` limited to the actor's sources
+      // (no actor: main + yahoo as before). Data and Config of other sources
+      // are never touched.
+      const targetSources = getCategoryUpdateSources(source, actor);
+      targetSources.forEach(src => {
         const targetSheets = getTargetSheets(src);
 
         // 1. Update existing transactions in Data Sheet
@@ -799,9 +1056,8 @@ function handleWriteAction(params, source) {
       });
       result = {success: true, message: 'Updated categories in Data and Config sheets'};
 
-      // Clear cache for ALL sources since category update affects all
-      clearCache('main');
-      clearCache('yahoo');
+      // Clear the cache of every source that was written
+      targetSources.forEach(src => clearCache(src));
       shouldClearCache = false; // Already handled
     }
 

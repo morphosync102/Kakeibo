@@ -23,7 +23,7 @@ Browser
 | --- | --- | --- | --- | --- | --- |
 | `main`または未指定 | 家庭用 | `/`, `/statistics`, `/calendar`, `/manage` | `Data` / `Config` / `Fixed` | `LINE_DESTINATION_MAIN` | 利用可 |
 | `yahoo` | 個人用 | `/yahoo`, `/yahoo/statistics`, `/yahoo/calendar`, `/yahoo/manage` | `Yahoo_Data` / `Yahoo_Config` / `Yahoo_Fixed` | `LINE_DESTINATION_YAHOO` | 利用可 |
-| `yuki` | Yuki 用 | (未実装。U1 で `/yuki` 配下を追加予定) | `Yuki_Data` / `Yuki_Config` / `Yuki_Fixed` | `LINE_DESTINATION_YUKI` | **未公開**(`{ "error": "Forbidden" }`。G2 の actor 照合導入後に actor 必須で公開) |
+| `yuki` | Yuki 用 | (未実装。U1 で `/yuki` 配下を追加予定) | `Yuki_Data` / `Yuki_Config` / `Yuki_Fixed` | `LINE_DESTINATION_YUKI` | actor 必須(actor 無しは`{ "error": "Forbidden" }`。§4「利用者の照合」) |
 
 コンポーネント、API、GASの全レイヤーでsource分離を維持します。
 GASはsourceレジストリ(`gas/コード.js`の`SOURCES`)を正本とし、シート名・キャッシュキー・LINE宛先・ラベルを
@@ -67,8 +67,9 @@ GASはsourceレジストリ(`gas/コード.js`の`SOURCES`)を正本とし、シ
   - 支出: 未分類・食費・カフェ・交通費・音ゲー・ダーツ・日用品・交際費・医療費・
     住居費・インフラ・旅行・その他・固定費・身だしなみ
   - 収入: 給料・臨時収入・賞与・立て替え・その他
-  - 「この店舗すべて」: 同じ店舗名の既存明細を両sourceで更新し、
+  - 「この店舗すべて」: 同じ店舗名の既存明細を両source(家庭用・個人用)で更新し、
     Configにも今後の自動分類ルールとして保存します(2タップ確認)。
+    GAS側の対象範囲は利用者の権限で絞られます(§4「POST actions」の`updateCategory`)。
   - 「この明細のみ」: 選択した1件だけを変更し、自動分類ルールは変更しません。
 - 明細1件を削除できます(2タップ確認)。
 - 破壊的でない書き込みは楽観的更新で即時反映し、結果はトーストで通知します。
@@ -219,6 +220,39 @@ GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシと
    直後に一覧表示と書き込みの両方を確認し、`Unauthorized`になる場合はPropertyを削除すれば即座に元へ戻せる。
 4. 動作確認後、GASの「未設定なら通す」処理を削除し、未設定時は拒否にする(後続タスク、IMPROVEMENTS 4-1)。
 
+### 利用者の照合(actor、GAS)
+
+設計書`docs/design/2026-11-yuki-and-passkeys.md` §5.7。プロキシはセッションから得た利用者を
+GETクエリ/POST本文の`actorUserId`(文字列)と`actorEpoch`(0以上の整数。クエリでは数字列)としてGASへ渡します
+(クライアント送信分は除去。プロキシ側はU2で実装予定。現行UI・現行プロキシは送りません)。
+
+GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定し、失敗時は何も読み書きしません。
+
+| 状況 | 応答 |
+| --- | --- |
+| `actorUserId`/`actorEpoch`の片方だけ、形式不正(IDは英数字`_-`の1〜64文字) | `{ "error": "Invalid actor" }` |
+| actor無し、かつ source が`yuki`(レジストリの`requiresActor`)またはScript Property`AUTHZ_ENFORCE`が`1` | `{ "error": "Forbidden" }` |
+| actor無し、`main`/`yahoo`、`AUTHZ_ENFORCE`未設定(`1`以外) | 従来どおり許可(旧UI互換) |
+| actor付きだが`PROXY_SECRET`未設定(actorを信頼できない) | `{ "error": "Unauthorized" }` |
+| `Auth_Users`シートが無い・必須列(userId/sources/epoch/status)が無い・読めない | `{ "error": "AuthUnavailable" }`(fail closed) |
+| 利用者が存在しない、`status`が`active`以外、`epoch`不一致 | `{ "error": "SessionRevoked" }` |
+| sourceが利用者の`sources`に無い | `{ "error": "Forbidden" }` |
+
+- ユーザー表`Auth_Users`(列は見出し名で特定: userId, displayName, role, sources, homeSource, epoch, status,
+  createdAt, updatedAt。sourcesはカンマ区切りのsource id)は認証系(G3)が作成・更新し、GASのデータ処理は読むだけです。
+  同じuserIdが複数行あれば(形式不正の行を含む)その利用者は信頼しません(全行無視)。
+- 解析済みのユーザー表はScript Cacheに、データ一覧と同じ世代方式で保存します
+  (世代`kakeibo_auth_users_gen`、表`kakeibo_auth_users_v1_<世代>`、10分)。ヒット時はシートを開きません。
+  読み込みはシートを読む前に世代を取得し(無ければ作成)、保存直前に世代が変わっていれば保存しません。
+- G3との契約: `Auth_Users`へ書き込む処理は、Script Lockを持ったまま書き込み後に`clearAuthUsersCache()`を呼びます。
+  `clearAuthUsersCache()`は`SpreadsheetApp.flush()`で書き込みを確定させてから世代を切り替えるため、
+  次の要求から新しいepoch・status・sourcesが効きます(書き込みと並行して読み始めた古い表が残ることはありません)。
+  例外は投げず(書き込みは成功済み)、世代の切替に失敗した場合は現世代の表を削除して代替します
+  (それも失敗した場合は最大10分古い表が残り得ます)。
+- 手作業で編集した場合はGASエディタから`clearAuthUsersCache()`を実行します(実行しなくても最大10分で反映)。
+- 時間トリガー・エディタ関数はactor照合の対象外です。
+- `AUTHZ_ENFORCE=1`は全利用者がactor付きのUIへ移行した後に設定します(再デプロイ不要、削除で即時に戻せる)。
+
 ### GET
 
 - `GET /api/expenses`: 対象sourceの明細一覧
@@ -229,9 +263,9 @@ GAS直接(プロキシ非経由、デプロイ確認用): `?action=version` → 
 
 `source`はGET/POST共通で、GASはレジストリの`main`(家庭用)・`yahoo`(個人用)・`yuki`(Yuki用)と、
 旧クライアント互換の省略・空文字(=`main`)を認識します。
-- 読み書きできるのは省略・空文字・`main`・`yahoo`です。
-- `yuki`は登録済みですが、Web Appでは利用者の照合(`actor`、G2)が入るまでGET/POSTとも
-  `{ "error": "Forbidden" }`を返し、何も読み書きしません(action判定より前)。
+- `actor`無しの要求(現行UI)で読み書きできるのは省略・空文字・`main`・`yahoo`です(`AUTHZ_ENFORCE`未設定時)。
+- `yuki`は常に`actor`必須です。`actor`無しではGET/POSTとも`{ "error": "Forbidden" }`を返し、何も読み書きしません。
+  `actor`付きの要求は次節「利用者の照合(actor)」の判定に従います。
 - それ以外(`Yahoo`等の表記ゆれ、文字列以外を含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
 - 「省略=main」の解釈はWeb App入力(`doGet`/`doPost`)だけで、GAS内部の関数(シート・キャッシュキー・宛先の解決)は
   sourceの明示を必須とし、省略・未知は例外にします。
@@ -254,7 +288,7 @@ APIルートの`maxDuration`は60秒です(クライアントの書き込みタ�
 | `deleteTransaction` | 対象sourceの明細1件削除。date/merchant/amountを渡すと厳密照合、id のみなら旧来の先頭一致 | id, [date, merchant, amount], [rowId] |
 | `updateTransactionDate` | 対象sourceの厳密一致明細1件の日付更新 | id, currentDate, merchant, amount, date, [rowId] |
 | `updateTransaction` | 対象sourceの厳密一致明細1件の金額・店舗名・カテゴリ更新(いずれか1つ以上) | id, currentDate, currentMerchant, currentAmount, [amount, merchant, category], [rowId] |
-| `updateCategory` | 両sourceの同一店舗カテゴリとConfig更新 | merchant, category |
+| `updateCategory` | カテゴリ共有グループ(`main`+`yahoo` / `yuki`)のうち利用者が権限を持つsourceの同一店舗カテゴリとConfig更新(下記) | merchant, category |
 | `addFixedCost` | 対象sourceへ固定費1件追加 | type, name, amount, day, category |
 | `deleteFixedCost` | 対象sourceの固定費1件削除。type/name/amount/dayを渡すと照合削除(idの行が一致すればその行、しなければ全行から最初の一致行、なければ`Fixed cost not found`)。idのみなら旧来の行番号指定 | [id], [type, name, amount, day, category] |
 
@@ -265,6 +299,17 @@ Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ�
 完了後に再検証します(`revalidateTag(tag, { expire: 0 })`)。
 
 `deleteFixedCost`はUIから`id`と照合フィールド(type/name/amount/day/category)を送ります。
+
+`updateCategory`の対象source = 要求sourceのカテゴリ共有グループ ∩ actorの`sources`
+(actor無しの旧クライアントはグループ全体)。対象sourceのDataとConfigだけを書き換え、対象sourceのキャッシュだけを無効化します。
+
+| 実行者(sources) | 要求source | 書き換えるData / Config | 無効化するキャッシュ |
+| --- | --- | --- | --- |
+| actor無し(現行UI) | `main`または`yahoo` | `Data`・`Yahoo_Data` / `Config`・`Yahoo_Config` | main, yahoo(従来どおり) |
+| 管理者(main, yahoo) | `main`または`yahoo` | `Data`・`Yahoo_Data` / `Config`・`Yahoo_Config` | main, yahoo |
+| Yuki(yuki, main) | `main` | `Data` / `Config`のみ(`Yahoo_*`は変更しない) | main |
+| Yuki(yuki, main) | `yuki` | `Yuki_Data` / `Yuki_Config`のみ | yuki |
+| 管理者 / actor無し | `yuki` | (`Forbidden`) | — |
 
 明細一覧(GET)の各要素は`id`(MessageId)、`date`、`merchant`、`amount`、`category`、`type`に加え、
 H列に値があれば`rowId`を含みます(空なら省略)。
@@ -374,6 +419,7 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `LINE_DESTINATION_YAHOO`
 - `LINE_DESTINATION_YUKI`: Yuki の月次レポート宛先(LINE userId)。任意。未設定の間は yuki の月次レポートを送らない
   (値の設定方法は設計書 §5.4 の LINE 連携。G4 で実装予定)
+- `AUTHZ_ENFORCE`: `1`で全データ要求にactorを必須にする(未設定・`1`以外は移行期間: actor無しのmain/yahooを許可)。秘密値ではない
 - `PROXY_SECRET`: プロキシ認証の共有シークレット(Vercelの`GAS_PROXY_SECRET`と同じ値。未設定時は認証なし=移行期間)
 
 実値はリポジトリ、テスト、ドキュメントへ保存しません。

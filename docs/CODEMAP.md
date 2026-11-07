@@ -84,11 +84,12 @@ useExpenses (localStorage, source別)   ← 即表示 + マウント時バック
 
 | 領域 | 主な関数 |
 | --- | --- |
-| エントリ | `doGet`(既定: 明細一覧 / `getFixedCosts`)、`doPost`(action分岐)、`responseJSON` |
+| エントリ | `doGet`(既定: 明細一覧 / `getFixedCosts`)、`doPost`(action分岐。`handleWriteAction(params, source, actor)`)、`responseJSON` |
 | キャッシュ | `getCacheKey`、`clearCache(source)`、`getExpensesWithCache`、`getFixedCostsWithCache` |
 | 書き込みaction | `addTransaction`(RowId採番)/ `deleteTransaction`(date/merchant/amount指定で厳密照合、idのみは旧互換の先頭一致、rowId があれば優先)/ `updateTransactionDate`(厳密照合、rowId 優先)/ `updateTransaction`(厳密照合で金額・店舗名・カテゴリ更新、rowId 優先)/ `updateCategory` / `addFixedCost` / `deleteFixedCost` |
 | メール取込 | `runEmailExtraction` → `extractRakutenEmails` / `extractOliveEmails` / `extractJcbEmails` + 各 `parse*Body`、`determineCategory`、`getExistingMessageIds` |
-| sourceレジストリ | `SOURCES` / `SOURCE_IDS`(main・yahoo・yuki のシート名・ラベル・LINE宛先Property・`lineOptional`・`requiresActor`)、`normalizeSource`(Web App入力。省略=main は旧クライアント互換)、`getSourceConfig` / `getTargetSheets(source)`(未知・省略は例外。main への落ち込み無し)、`checkWebAppSourceAccess`(`requiresActor` の source は G2 まで `Forbidden`)、`runForEachSource`(source ごとの try/catch ループ)、`setupSourceSheets`(エディタ実行、冪等) |
+| sourceレジストリ | `SOURCES` / `SOURCE_IDS`(main・yahoo・yuki のシート名・ラベル・LINE宛先Property・`lineOptional`・`requiresActor`)、`normalizeSource`(Web App入力。省略=main は旧クライアント互換)、`getSourceConfig` / `getTargetSheets(source)`(未知・省略は例外。main への落ち込み無し)、`runForEachSource`(source ごとの try/catch ループ)、`setupSourceSheets`(エディタ実行、冪等)、`CATEGORY_GROUPS` + `getCategoryUpdateSources`(updateCategory の対象 = グループ ∩ actor の sources) |
+| actor照合 | `authorizeDataRequest`(doGet/doPost で key・source 検証の後。`readActorParams` / `parseEpoch`、`AUTHZ_ENFORCE` は `isAuthzEnforced`、actor は `PROXY_SECRET` 設定時のみ信頼 `isProxySecretConfigured`)、`getAuthUsers`(世代付き Script Cache → `Auth_Users` シート、`parseAuthUsers` は見出し名で列特定・複数行の userId は形式不正の行を含め無効)、`clearAuthUsersCache`(flush → 世代切替。Auth_Users 書き込み後にロック内で・手編集後に実行)。シート作成・更新は G3 |
 | 固定費 | `processFixedCosts`(日次トリガー、レジストリ全件)→ `processFixedCostsForSource(source)`(source 必須) |
 | 月次LINEレポート | `sendMonthlyKakeiboReports`(毎月10日トリガー、レジストリ全件、宛先未設定は `lineOptional` の yuki のみスキップ・main/yahoo は失敗)→ `sendMonthlyKakeiboReportForSource`、`buildMonthlyKakeiboReportText`、`pushLineTextMessage`、`testSend*` 各種 |
 | RowId(H列) | `newRowId`、`ensureRowIdColumn`、`readRowIdParam`、`findTransactionRowIndex`(rowId+内容一致、未採番行へのフォールバック)、`backfillRowIds`(レジストリ全 source の既存行の採番、手動1回実行・冪等) |

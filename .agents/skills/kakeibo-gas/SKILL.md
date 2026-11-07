@@ -37,12 +37,33 @@ Registry: `SOURCES` in `gas/コード.js` (sheets, label, LINE destination prope
 
 - `main`: 家庭用 kakeibo
 - `yahoo`: 個人用 kakeibo
-- `yuki`: Yuki 用 kakeibo. `requiresActor: true`: the Web App answers `{ error: 'Forbidden' }` for it until
-  actor verification (design G2) exists. Time-driven functions (fixed costs, monthly report) and
-  `backfillRowIds` already include it.
+- `yuki`: Yuki 用 kakeibo. `requiresActor: true`: the Web App serves it only to a verified actor
+  (`{ error: 'Forbidden' }` without one, whatever `AUTHZ_ENFORCE` says). Time-driven functions
+  (fixed costs, monthly report) and `backfillRowIds` include it.
 
-Adding a source: add a `SOURCES` entry, run `setupSourceSheets()` from the editor (idempotent; creates only
-missing sheets with the headers below), and update `docs/SPECIFICATION.md`.
+Adding a source: add a `SOURCES` entry and its own `CATEGORY_GROUPS` group, run `setupSourceSheets()` from the
+editor (idempotent; creates only missing sheets with the headers below), and update `docs/SPECIFICATION.md`.
+
+## Actor verification (doGet / doPost)
+
+Order: `key` check → `normalizeSource` → `authorizeDataRequest(params, source)` → action. Nothing is read or
+written before all three pass. The proxy sends `actorUserId` / `actorEpoch`; the actor is trusted only when
+`PROXY_SECRET` is set (otherwise `Unauthorized`). Errors: `Invalid actor`, `Forbidden` (no actor where one is
+required, or source not in the user's `sources`), `SessionRevoked` (unknown / not active / epoch mismatch),
+`AuthUnavailable` (`Auth_Users` missing or unreadable: fail closed). `AUTHZ_ENFORCE=1` requires an actor on
+every data request; while unset, requests without actor keep working for main / yahoo (current UI).
+
+- The user table is read from `Auth_Users` (columns found by header name; a userId on several rows, valid or
+  not, is ignored entirely) through the Script Cache with a generation token like the data lists
+  (`kakeibo_auth_users_gen`, table `kakeibo_auth_users_v1_<gen>`, 10 min).
+- Contract for every `Auth_Users` write (G3): write under the script lock, then call `clearAuthUsersCache()`
+  before releasing it. It flushes, then rotates the generation (never throws; on rotation failure it removes
+  the current table), so the next request sees the new epoch / status / sources immediately.
+- `updateCategory` writes only `getCategoryUpdateSources(source, actor)` = the source's `CATEGORY_GROUPS`
+  group ∩ the actor's sources (no actor: the whole group, i.e. main + yahoo as before), and clears only
+  those sources' caches. Never add a write that crosses groups.
+- New data actions must take the `actor` passed to `handleWriteAction` into account when they touch more
+  than the requested source.
 
 `normalizeSource` maps an absent / empty Web App `source` to `main` for old clients only (doGet/doPost);
 internal functions (`getTargetSheets`, `getCacheSourceKey` / `clearCache`, `processFixedCostsForSource`,
@@ -128,7 +149,7 @@ Never insert columns before H: code depends on column numbers (G = Type).
 - POST `deleteTransaction` (strict match with date/merchant/amount; id-only falls back to legacy first match)
 - POST `updateTransactionDate`
 - POST `updateTransaction` (strict match; updates amount/merchant/category on one row)
-- POST `updateCategory`
+- POST `updateCategory` (category group of the source ∩ the actor's sources; see Actor verification)
 - POST `addFixedCost`
 - POST `deleteFixedCost`
 
@@ -190,7 +211,9 @@ Script Properties required:
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
 - `LINE_DESTINATION_YUKI` (optional until Yuki links LINE)
-- `PROXY_SECRET` (optional during migration: shared secret checked as `key`; must equal Vercel `GAS_PROXY_SECRET`)
+- `PROXY_SECRET` (optional during migration: shared secret checked as `key`; must equal Vercel `GAS_PROXY_SECRET`;
+  required for any request carrying an actor)
+- `AUTHZ_ENFORCE` (optional, not secret: `1` requires an actor on every data request)
 
 Never store these values in the repository, project skills, tests, or documentation:
 
