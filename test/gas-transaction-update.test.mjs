@@ -22,7 +22,8 @@ function loadGasWithRows(rows) {
   };
   const sandbox = {
     console,
-    CacheService: { getScriptCache: () => ({ get: () => null, put: () => {}, removeAll: () => {} }) },
+    CacheService: { getScriptCache: () => ({ get: () => null, getAll: () => ({}), put: () => {}, putAll: () => {}, removeAll: () => {} }) },
+    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     ContentService: {
       MimeType: { JSON: 'application/json' },
       createTextOutput: (body) => ({ body, setMimeType: () => ({ body }) }),
@@ -38,6 +39,7 @@ function loadGasWithRows(rows) {
       openById: () => ({
         getSheetByName: () => sheet,
       }),
+      flush: () => {},
     },
     UrlFetchApp: {},
     Utilities: {

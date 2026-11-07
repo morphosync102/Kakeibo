@@ -17,6 +17,24 @@ const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
 
 // Cache Configuration
 const CACHE_TTL = 21600; // 6 hours (Max allowed)
+// CacheService values are limited to 100KB. Lists are stored in chunks of at
+// most CACHE_CHUNK_CHARS UTF-16 units (<= 3 UTF-8 bytes each => <= 90KB).
+const CACHE_CHUNK_CHARS = 30000;
+const MAX_CACHE_CHUNKS = 30;
+
+// Concurrency: every write takes the script lock (IMPROVEMENTS 4-5)
+const LOCK_WAIT_MS = 20000; // Web App requests: answer Busy rather than hang
+const FIXED_COST_LOCK_WAIT_MS = 120000; // daily trigger: a skipped day is not retried
+
+// --- Helper: source validation ---
+// Accepted: absent (undefined / null / '') or 'main' -> 'main', 'yahoo' -> 'yahoo'.
+// Anything else returns null and must be rejected with {error: 'Invalid source'}
+// so a typo can never write personal data into the household sheets.
+function normalizeSource(source) {
+  if (source === undefined || source === null || source === '' || source === 'main') return 'main';
+  if (source === 'yahoo') return 'yahoo';
+  return null;
+}
 
 // --- Helper: Get Target Sheet Names based on source ---
 function getTargetSheets(source) {
@@ -34,31 +52,218 @@ function getTargetSheets(source) {
   };
 }
 
-// --- Helper: Cache Management ---
-function getCacheKey(source, type) {
-  return `kakeibo_${source || 'main'}_${type}`;
+// --- Helper: Script lock ---
+// Runs fn while holding the script lock. Returns onBusy() without running fn
+// when the lock cannot be acquired within waitMs (default LOCK_WAIT_MS).
+// Pending spreadsheet writes are flushed before the lock is released so the
+// next holder reads them.
+function runWithScriptLock(fn, onBusy, waitMs) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(waitMs || LOCK_WAIT_MS)) return onBusy();
+  try {
+    return fn();
+  } finally {
+    try {
+      SpreadsheetApp.flush();
+    } finally {
+      lock.releaseLock();
+    }
+  }
 }
 
-function clearCache(source) {
-  const cache = CacheService.getScriptCache();
-  // Clear both data and fixed costs cache for the source
-  cache.removeAll([
-    getCacheKey(source, 'data'),
-    getCacheKey(source, 'fixed')
-  ]);
-  // Also clear 'main' if source is undefined, just to be safe
-  if (!source) {
-    cache.removeAll([
-      getCacheKey('main', 'data'),
-      getCacheKey('main', 'fixed')
-    ]);
+// --- Helper: Cache Management ---
+// Cached lists are stored under a per-source generation token:
+//   kakeibo_<src>_gen                 -> current generation (shared by data/fixed)
+//   kakeibo_<src>_<type>_<gen>_chunks -> chunk count
+//   kakeibo_<src>_<type>_<gen>_<i>    -> chunk i
+// clearCache() rotates the generation, so a read that started before a write
+// can only store its (stale) list under a dead generation, and chunks from
+// different generations can never be mixed on read.
+
+// Callers pass an already-validated source; undefined / '' / 'main' share a key.
+function getCacheSourceKey(source) {
+  return `kakeibo_${normalizeSource(source) || 'main'}`;
+}
+
+function getCacheKey(source, type) {
+  return `${getCacheSourceKey(source)}_${type}`;
+}
+
+function getCacheGenKey(source) {
+  return `${getCacheSourceKey(source)}_gen`;
+}
+
+function newCacheGen() {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Returns the current generation, creating it when missing (evicted/expired).
+// It is read (or created) BEFORE the sheet is read: a write whose clearCache
+// this creation might overwrite has already written the sheet, so the list
+// read afterwards is not stale. Returns null if the cache is unavailable.
+function getOrCreateCacheGen(cache, source) {
+  try {
+    const genKey = getCacheGenKey(source);
+    const current = cache.get(genKey);
+    if (current) return current;
+    const created = newCacheGen();
+    cache.put(genKey, created, CACHE_TTL);
+    return created;
+  } catch (err) {
+    console.warn(`Cache generation unavailable for ${source}: ${err}`);
+    return null;
   }
+}
+
+function getChunkPrefix(baseKey, gen) {
+  return `${baseKey}_${gen}`;
+}
+
+function getChunkCountKey(prefix) {
+  return `${prefix}_chunks`;
+}
+
+function getChunkKeys(prefix, count) {
+  const keys = [];
+  for (let i = 0; i < count; i++) keys.push(`${prefix}_${i}`);
+  return keys;
+}
+
+function splitIntoCacheChunks(str) {
+  const chunks = [];
+  let start = 0;
+  while (start < str.length) {
+    let end = Math.min(start + CACHE_CHUNK_CHARS, str.length);
+    // Never split a surrogate pair across chunks
+    const last = str.charCodeAt(end - 1);
+    if (end < str.length && last >= 0xD800 && last <= 0xDBFF) end -= 1;
+    chunks.push(str.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+// Returns the cached string of generation `gen`, or null on a miss
+// (count missing/invalid or any chunk missing)
+function getChunkedCache(cache, baseKey, gen) {
+  if (!gen) return null;
+  try {
+    const prefix = getChunkPrefix(baseKey, gen);
+    const countValue = cache.get(getChunkCountKey(prefix));
+    if (!countValue || !/^\d+$/.test(countValue)) return null;
+    const count = Number(countValue);
+    if (count < 1 || count > MAX_CACHE_CHUNKS) return null;
+    const keys = getChunkKeys(prefix, count);
+    const values = cache.getAll(keys);
+    const parts = [];
+    for (const key of keys) {
+      if (typeof values[key] !== 'string') return null;
+      parts.push(values[key]);
+    }
+    return parts.join('');
+  } catch (err) {
+    console.warn(`Cache read failed for ${baseKey}: ${err}`);
+    return null;
+  }
+}
+
+// Best effort: a cache failure (size limit, service error) must never fail the read.
+// Stores only if the generation is still the one read before the sheet was read.
+function putChunkedCache(cache, baseKey, gen, source, str) {
+  if (!gen) return;
+  try {
+    if (cache.get(getCacheGenKey(source)) !== gen) {
+      console.log(`Skip caching ${baseKey}: generation changed during read`);
+      return;
+    }
+    const chunks = splitIntoCacheChunks(str);
+    if (chunks.length === 0) chunks.push('');
+    if (chunks.length > MAX_CACHE_CHUNKS) {
+      console.warn(`Skip caching ${baseKey}: ${chunks.length} chunks exceeds ${MAX_CACHE_CHUNKS}`);
+      return;
+    }
+    const prefix = getChunkPrefix(baseKey, gen);
+    const entries = {};
+    chunks.forEach((chunk, i) => { entries[`${prefix}_${i}`] = chunk; });
+    // Count key is written in the same call; a partial write is detected on read
+    entries[getChunkCountKey(prefix)] = String(chunks.length);
+    cache.putAll(entries, CACHE_TTL);
+  } catch (err) {
+    console.warn(`Cache write failed for ${baseKey}: ${err}`);
+  }
+}
+
+function getCacheKeysToClear(baseKey, gen) {
+  // Legacy single-value key, plus the previous generation's chunks if known
+  const keys = [baseKey];
+  if (gen) {
+    const prefix = getChunkPrefix(baseKey, gen);
+    keys.push(getChunkCountKey(prefix));
+    getChunkKeys(prefix, MAX_CACHE_CHUNKS).forEach(key => keys.push(key));
+  }
+  return keys;
+}
+
+// Invalidates the data and fixed-cost caches of one source by rotating its
+// generation. Called after a successful write, so it never throws: reporting
+// an error for a write that already landed would make the UI resend it.
+// 1. flush: commit pending sheet writes first, otherwise a doGet could pick up
+//    the new generation, read the pre-write sheet and cache the stale list.
+// 2. rotate the generation (invalidates everything cached under the old one).
+// 3. remove the old generation's chunks and the legacy key. This is
+//    housekeeping when rotation worked, and the fallback when it failed.
+// Returns true when the generation was rotated.
+function clearCache(source) {
+  try {
+    SpreadsheetApp.flush();
+  } catch (err) {
+    console.warn(`Flush before cache invalidation failed for ${source}: ${err}`);
+  }
+
+  let cache;
+  try {
+    cache = CacheService.getScriptCache();
+  } catch (err) {
+    console.warn(`Cache invalidation failed for ${source}: ${err}`);
+    return false;
+  }
+
+  const genKey = getCacheGenKey(source);
+  let previousGen = null;
+  try {
+    previousGen = cache.get(genKey);
+  } catch (err) {
+    console.warn(`Cache generation read failed for ${source}: ${err}`);
+  }
+
+  let rotated = false;
+  try {
+    cache.put(genKey, newCacheGen(), CACHE_TTL);
+    rotated = true;
+  } catch (err) {
+    console.warn(`Cache generation rotation failed for ${source}; removing current chunks instead: ${err}`);
+  }
+
+  try {
+    cache.removeAll(
+      getCacheKeysToClear(getCacheKey(source, 'data'), previousGen)
+        .concat(getCacheKeysToClear(getCacheKey(source, 'fixed'), previousGen))
+    );
+  } catch (err) {
+    console.warn(`Cache cleanup failed for ${source}${rotated ? '' : ' (cache may stay stale until it expires)'}: ${err}`);
+  }
+  return rotated;
+}
+
+function jsonTextOutput(jsonStr) {
+  return ContentService.createTextOutput(jsonStr).setMimeType(ContentService.MimeType.JSON);
 }
 
 // --- API: Read Data ---
 function doGet(e) {
   const action = e.parameter.action;
-  const source = e.parameter.source; // 'yahoo' or undefined
+  const source = normalizeSource(e.parameter.source); // 'main' | 'yahoo' | null
+  if (!source) return responseJSON({error: 'Invalid source'});
 
   if (action === 'getFixedCosts') {
     return getFixedCostsWithCache(source);
@@ -71,10 +276,11 @@ function doGet(e) {
 function getFixedCostsWithCache(source) {
   const cache = CacheService.getScriptCache();
   const cacheKey = getCacheKey(source, 'fixed');
-  const cached = cache.get(cacheKey);
+  const gen = getOrCreateCacheGen(cache, source); // before reading the sheet
+  const cached = getChunkedCache(cache, cacheKey, gen);
 
-  if (cached) {
-    return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+  if (cached !== null) {
+    return jsonTextOutput(cached);
   }
 
   const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -96,18 +302,19 @@ function getFixedCostsWithCache(source) {
   }));
 
   const jsonStr = JSON.stringify(fixedCosts);
-  cache.put(cacheKey, jsonStr, CACHE_TTL);
+  putChunkedCache(cache, cacheKey, gen, source, jsonStr);
 
-  return ContentService.createTextOutput(jsonStr).setMimeType(ContentService.MimeType.JSON);
+  return jsonTextOutput(jsonStr);
 }
 
 function getExpensesWithCache(source) {
   const cache = CacheService.getScriptCache();
   const cacheKey = getCacheKey(source, 'data');
-  const cached = cache.get(cacheKey);
+  const gen = getOrCreateCacheGen(cache, source); // before reading the sheet
+  const cached = getChunkedCache(cache, cacheKey, gen);
 
-  if (cached) {
-    return ContentService.createTextOutput(cached).setMimeType(ContentService.MimeType.JSON);
+  if (cached !== null) {
+    return jsonTextOutput(cached);
   }
 
   const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -136,12 +343,22 @@ function getExpensesWithCache(source) {
   });
 
   const jsonStr = JSON.stringify(formattedMsg);
-  cache.put(cacheKey, jsonStr, CACHE_TTL);
+  putChunkedCache(cache, cacheKey, gen, source, jsonStr);
 
-  return ContentService.createTextOutput(jsonStr).setMimeType(ContentService.MimeType.JSON);
+  return jsonTextOutput(jsonStr);
 }
 
 // --- API: Write Data ---
+const WRITE_ACTIONS = [
+  'addTransaction',
+  'addFixedCost',
+  'deleteFixedCost',
+  'deleteTransaction',
+  'updateTransaction',
+  'updateTransactionDate',
+  'updateCategory'
+];
+
 function doPost(e) {
   try {
     const params = JSON.parse(e.postData.contents);
@@ -150,8 +367,29 @@ function doPost(e) {
       return responseJSON({success: true, ignored: 'lineWebhook'});
     }
 
+    const source = normalizeSource(params.source); // 'main' | 'yahoo' | null
+    if (!source) return responseJSON({error: 'Invalid source'});
+
+    if (WRITE_ACTIONS.indexOf(params.action) === -1) {
+      return responseJSON({error: 'Unknown action'});
+    }
+
+    // Rows are (re)read and matched inside the lock, so a concurrent write
+    // cannot shift row numbers between the read and the write.
+    const result = runWithScriptLock(
+      () => handleWriteAction(params, source),
+      () => ({error: 'Busy'})
+    );
+    return responseJSON(result);
+
+  } catch (err) {
+    return responseJSON({error: err.toString()});
+  }
+}
+
+// Must be called while holding the script lock. Returns the response object.
+function handleWriteAction(params, source) {
     const action = params.action;
-    const source = params.source; // 'yahoo' or undefined
     const sheets = getTargetSheets(source);
     const ss = SpreadsheetApp.openById(SHEET_ID);
 
@@ -160,7 +398,7 @@ function doPost(e) {
 
     if (action === 'addTransaction') {
       const sheet = ss.getSheetByName(sheets.data);
-      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
       sheet.appendRow([
         params.date,
@@ -177,7 +415,7 @@ function doPost(e) {
 
     else if (action === 'addFixedCost') {
       const sheet = ss.getSheetByName(sheets.fixed);
-      if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+      if (!sheet) return {error: `No sheet: ${sheets.fixed}`};
 
       sheet.appendRow([
         params.type,
@@ -191,18 +429,21 @@ function doPost(e) {
     }
 
     else if (action === 'deleteFixedCost') {
-       const sheet = ss.getSheetByName(sheets.fixed);
-       if (!sheet) return responseJSON({error: `No sheet: ${sheets.fixed}`});
+      const sheet = ss.getSheetByName(sheets.fixed);
+      if (!sheet) return {error: `No sheet: ${sheets.fixed}`};
 
-       const rowIndex = parseInt(params.id) + 2;
-       sheet.deleteRow(rowIndex);
-       result = {success: true};
-       shouldClearCache = true;
+      const data = sheet.getDataRange().getValues(); // data[0] is the header
+      const rowIndex = findFixedCostRowIndex(data, params);
+      if (rowIndex.error) return {error: rowIndex.error};
+
+      sheet.deleteRow(rowIndex.index + 1); // data index -> sheet row (1-based)
+      result = {success: true};
+      shouldClearCache = true;
     }
 
     else if (action === 'deleteTransaction') {
       const sheet = ss.getSheetByName(sheets.data);
-      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
       const data = sheet.getDataRange().getValues();
       const targetId = params.id;
@@ -215,7 +456,7 @@ function doPost(e) {
         params.merchant !== undefined &&
         params.amount !== undefined;
       const targetDate = hasStrictFields ? normalizeTransactionDate(params.date) : null;
-      if (hasStrictFields && !targetDate) return responseJSON({error: 'Invalid transaction date'});
+      if (hasStrictFields && !targetDate) return {error: 'Invalid transaction date'};
 
       let found = false;
       for (let i = 1; i < data.length; i++) {
@@ -242,28 +483,28 @@ function doPost(e) {
 
     else if (action === 'updateTransaction') {
       const sheet = ss.getSheetByName(sheets.data);
-      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
       const currentDate = normalizeTransactionDate(params.currentDate);
-      if (!currentDate) return responseJSON({error: 'Invalid current transaction date'});
+      if (!currentDate) return {error: 'Invalid current transaction date'};
 
       // New values are optional; identifying fields (id, currentDate,
       // currentMerchant, currentAmount) follow the updateTransactionDate contract.
       const updates = {};
       if (params.amount !== undefined) {
         const amount = Number(params.amount);
-        if (!isFinite(amount) || amount <= 0) return responseJSON({error: 'Invalid amount'});
+        if (!isFinite(amount) || amount <= 0) return {error: 'Invalid amount'};
         updates.amount = amount;
       }
       if (params.merchant !== undefined) {
         const merchant = String(params.merchant).trim();
-        if (!merchant) return responseJSON({error: 'Invalid merchant'});
+        if (!merchant) return {error: 'Invalid merchant'};
         updates.merchant = merchant;
       }
       if (params.category !== undefined) {
         updates.category = String(params.category);
       }
-      if (Object.keys(updates).length === 0) return responseJSON({error: 'No fields to update'});
+      if (Object.keys(updates).length === 0) return {error: 'No fields to update'};
 
       const data = sheet.getDataRange().getValues();
       let found = false;
@@ -294,13 +535,13 @@ function doPost(e) {
 
     else if (action === 'updateTransactionDate') {
       const sheet = ss.getSheetByName(sheets.data);
-      if (!sheet) return responseJSON({error: `No sheet: ${sheets.data}`});
+      if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
       const newDate = normalizeTransactionDate(params.date);
-      if (!newDate) return responseJSON({error: 'Invalid transaction date'});
+      if (!newDate) return {error: 'Invalid transaction date'};
 
       const currentDate = normalizeTransactionDate(params.currentDate);
-      if (!currentDate) return responseJSON({error: 'Invalid current transaction date'});
+      if (!currentDate) return {error: 'Invalid current transaction date'};
 
       const data = sheet.getDataRange().getValues();
       let found = false;
@@ -369,7 +610,7 @@ function doPost(e) {
       result = {success: true, message: 'Updated categories in Data and Config sheets'};
 
       // Clear cache for ALL sources since category update affects all
-      clearCache(null); // Clears main
+      clearCache('main');
       clearCache('yahoo');
       shouldClearCache = false; // Already handled
     }
@@ -378,11 +619,47 @@ function doPost(e) {
       clearCache(source);
     }
 
-    return responseJSON(result);
+    return result;
+}
 
-  } catch (err) {
-    return responseJSON({error: err.toString()});
+// A fixed cost id is the 0-based position below the header (as returned by getFixedCosts)
+function parseFixedCostId(id) {
+  if (typeof id === 'number' && Number.isInteger(id) && id >= 0) return id;
+  if (typeof id === 'string' && /^\d+$/.test(id)) return Number(id);
+  return null;
+}
+
+// Locates the Fixed sheet row to delete. `data` includes the header at index 0.
+// Returns {index} (data index, always >= 1) or {error}.
+// - New callers send type/name/amount/day (+ optional category): the row at id
+//   is used when it matches, otherwise the first matching row anywhere.
+// - Legacy callers send only id: a valid, in-range id is trusted as before.
+function findFixedCostRowIndex(data, params) {
+  const id = parseFixedCostId(params.id);
+  const hasMatchFields =
+    params.type !== undefined &&
+    params.name !== undefined &&
+    params.amount !== undefined &&
+    params.day !== undefined;
+
+  if (!hasMatchFields) {
+    if (id === null) return {error: 'Invalid fixed cost id'};
+    if (id + 1 >= data.length) return {error: 'Fixed cost not found'};
+    return {index: id + 1};
   }
+
+  const matches = row =>
+    String(row[0]) === String(params.type) &&
+    String(row[1]) === String(params.name) &&
+    Number(row[2]) === Number(params.amount) &&
+    Number(row[3]) === Number(params.day) &&
+    (params.category === undefined || String(row[4]) === String(params.category));
+
+  if (id !== null && id + 1 < data.length && matches(data[id + 1])) return {index: id + 1};
+  for (let i = 1; i < data.length; i++) {
+    if (matches(data[i])) return {index: i};
+  }
+  return {error: 'Fixed cost not found'};
 }
 
 function responseJSON(data) {
@@ -397,6 +674,17 @@ function processFixedCosts() {
 
 function processFixedCostsForSource(source) {
   console.log(`--- Checking Fixed Costs for: ${source || 'default'} ---`);
+  // Only rows whose day equals today are added, so a run that cannot get the
+  // lock is NOT retried by tomorrow's trigger: wait longer and log loudly.
+  runWithScriptLock(
+    () => addDueFixedCosts(source),
+    () => console.warn(`Fixed costs for ${source || 'main'} were NOT added today: lock busy for ${FIXED_COST_LOCK_WAIT_MS / 1000}s. Tomorrow's trigger does not catch up (not retried); run processFixedCosts() again today or add them manually.`),
+    FIXED_COST_LOCK_WAIT_MS
+  );
+}
+
+// Must be called while holding the script lock (duplicate check + append)
+function addDueFixedCosts(source) {
   const sheets = getTargetSheets(source);
   const ss = SpreadsheetApp.openById(SHEET_ID);
 
@@ -467,13 +755,11 @@ function extractRakutenEmails() {
   const messages = GmailApp.getMessagesForThreads(threads);
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const sheet = ss.getSheetByName(sheets.data);
-  const existingIds = getExistingMessageIds(sheet);
   const newRows = [];
 
   for (const threadMessages of messages) {
     for (const message of threadMessages) {
       if (message.getSubject().includes("速報版")) continue;
-      if (existingIds.has(message.getId())) continue;
 
       const items = parseEmailBody(message.getPlainBody());
       for (const item of items) {
@@ -491,11 +777,8 @@ function extractRakutenEmails() {
     }
   }
 
-  if (newRows.length > 0) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
-    console.log(`Added ${newRows.length} transactions.`);
-    clearCache(null); // Clear main cache
-  }
+  const added = appendImportedRows(sheet, newRows, 'main', 'Rakuten');
+  if (added > 0) console.log(`Added ${added} transactions.`);
 }
 
 function parseEmailBody(body) {
@@ -543,12 +826,10 @@ function extractOliveEmails() {
   const messages = GmailApp.getMessagesForThreads(threads);
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const sheet = ss.getSheetByName(sheets.data);
-  const existingIds = getExistingMessageIds(sheet);
   const newRows = [];
 
   for (const threadMessages of messages) {
     for (const message of threadMessages) {
-      if (existingIds.has(message.getId())) continue;
 
       const body = message.getPlainBody();
       const items = parseOliveBody(body);
@@ -567,10 +848,7 @@ function extractOliveEmails() {
     }
   }
 
-  if (newRows.length > 0) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
-    clearCache('yahoo'); // Clear yahoo cache
-  }
+  appendImportedRows(sheet, newRows, 'yahoo', 'Olive');
 }
 
 function parseOliveBody(body) {
@@ -615,12 +893,10 @@ function extractJcbEmails() {
   const messages = GmailApp.getMessagesForThreads(threads);
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const sheet = ss.getSheetByName(sheets.data);
-  const existingIds = getExistingMessageIds(sheet);
   const newRows = [];
 
   for (const threadMessages of messages) {
     for (const message of threadMessages) {
-      if (existingIds.has(message.getId())) continue;
 
       const items = parseJcbBody(message.getPlainBody());
       for (const item of items) {
@@ -638,10 +914,7 @@ function extractJcbEmails() {
     }
   }
 
-  if (newRows.length > 0) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
-    clearCache('yahoo');
-  }
+  appendImportedRows(sheet, newRows, 'yahoo', 'JCB');
 }
 
 function parseJcbBody(body) {
@@ -659,6 +932,24 @@ function parseJcbBody(body) {
 }
 
 // --- Shared Helpers ---
+
+// Appends parsed email rows (MessageId in column E) under the script lock.
+// The duplicate check runs inside the lock so overlapping trigger runs cannot
+// insert the same message twice. Returns the number of rows added.
+function appendImportedRows(sheet, rows, source, label) {
+  if (!sheet || rows.length === 0) return 0;
+  return runWithScriptLock(() => {
+    const existingIds = getExistingMessageIds(sheet);
+    const newRows = rows.filter(row => !existingIds.has(row[4]));
+    if (newRows.length === 0) return 0;
+    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    clearCache(source);
+    return newRows.length;
+  }, () => {
+    console.warn(`${label} import skipped: lock busy (next trigger retries)`);
+    return 0;
+  });
+}
 
 function determineCategory(merchant, categoryMap) {
   const normMerchant = normalizeText(merchant);

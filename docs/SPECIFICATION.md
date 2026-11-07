@@ -161,6 +161,9 @@ Next.jsは`GAS_API_URL`へリクエストを転送します。
 - `GET /api/expenses?source=yahoo`: 個人用明細一覧
 - `GET /api/expenses?action=getFixedCosts[&source=yahoo]`: 固定費一覧
 
+`source`はGET/POST共通で、省略・空文字・`main`(家庭用)と`yahoo`(個人用)のみ受理します。
+それ以外(`Yahoo`等の表記ゆれを含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
+
 ### POST actions
 
 | action | 更新範囲 | 主な入力 |
@@ -171,9 +174,11 @@ Next.jsは`GAS_API_URL`へリクエストを転送します。
 | `updateTransaction` | 対象sourceの厳密一致明細1件の金額・店舗名・カテゴリ更新(いずれか1つ以上) | id, currentDate, currentMerchant, currentAmount, [amount, merchant, category] |
 | `updateCategory` | 両sourceの同一店舗カテゴリとConfig更新 | merchant, category |
 | `addFixedCost` | 対象sourceへ固定費1件追加 | type, name, amount, day, category |
-| `deleteFixedCost` | 対象sourceの固定費1件削除 | id |
+| `deleteFixedCost` | 対象sourceの固定費1件削除。type/name/amount/dayを渡すと照合削除(idの行が一致すればその行、しなければ全行から最初の一致行、なければ`Fixed cost not found`)。idのみなら旧来の行番号指定 | [id], [type, name, amount, day, category] |
 
 GASはJSONで`{ success: true, ... }`または`{ error: "..." }`を返します。
+全書き込みactionはScript Lock内で行を読み直して照合してから書き込みます。20秒以内に
+ロックを取得できない場合は何も変更せず`{ "error": "Busy" }`を返します(クライアントは失敗として扱う)。
 Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ以外は`expenses`タグを
 完了後に再検証します。
 
@@ -181,12 +186,16 @@ Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ�
 
 - `deleteTransaction`はid(MessageId)のみで呼ばれた場合に限り、旧クライアント互換として
   先頭一致行を削除します。現行UIは常にdate/merchant/amountを送り厳密照合します。
+- `deleteFixedCost`は照合フィールドが無い場合に限り、旧クライアント互換としてidを行番号として
+  扱います。idは0以上の整数(数値または数字のみの文字列)で範囲内である必要があり、
+  それ以外はエラーを返します。ヘッダ行は削除しません。
 
 ## 5. 自動処理
 
 ### メール取込
 
 `runEmailExtraction()`がカード通知メールを読み取り、重複MessageIdを除外して追加します。
+重複判定と追加はScript Lock内で行い、ロックを取得できない回は追加せずログを残して次回に持ち越します。
 
 | 通知元 | 保存先 |
 | --- | --- |
@@ -197,7 +206,9 @@ Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ�
 ### 固定費
 
 `processFixedCosts()`を日次トリガーで実行します。IDは月・名称・sourceから生成し、
-同月の重複登録を防ぎます。
+同月の重複登録を防ぎます。重複判定と追加はsourceごとにScript Lock内で行い、
+ロックは最大120秒待ちます。取得できない回はその日の分が追加されず、翌日のトリガーでも
+補完されない(当日日付の行のみ対象のため)ので、警告ログを確認して当日中に再実行または手入力します。
 
 ### 月次LINEレポート
 
@@ -216,6 +227,21 @@ LINE webhook形式のPOSTは、メール転送や家計簿更新をせず成功�
 | Browser | source別localStorage | `useExpenses.refresh()`とバックグラウンド取得で更新 |
 | Next.js | `expenses`タグ、1時間再検証 | POST完了後に`revalidateTag` |
 | GAS | source・data/fixed別Script Cache、6時間 | GAS書き込み成功後に`clearCache(source)` |
+
+GAS Script Cacheはsourceごとの世代トークン`kakeibo_{main|yahoo}_gen`(data/fixed共通、
+source省略・空文字は`main`)を持ち、一覧は`<key>_<gen>_chunks`(チャンク数)と
+`<key>_<gen>_0`〜(本体)に分割して`putAll`で保存します(`<key>`は`kakeibo_{src}_{data|fixed}`、
+値の100KB上限対策、最大30チャンク)。
+
+- 読み込みは現在の世代のキーだけを見ます。チャンクが1つでも欠けたらミス扱いでシートから読み直します。
+- doGetはシートを読む前に世代を取得し(無ければ新規作成)、保存直前に世代が変わっていれば保存しません。
+  書き込み前に読み始めた古い一覧がキャッシュに残ることはありません。
+- `clearCache(source)`は`SpreadsheetApp.flush()`でシート書き込みを確定させてから世代を更新して
+  既存キャッシュを無効化し、旧世代のチャンクと旧形式の単一キーをベストエフォートで削除します。
+- `clearCache`は例外を投げません。書き込み成功後に無効化が失敗しても書き込みは`success`を返し
+  (UIの再送による二重登録を防ぐ)、警告ログを残します。世代更新に失敗した場合は
+  現世代のチャンクと旧形式キーの削除で代替します(これも失敗した場合は最大6時間古い一覧が残り得ます)。
+- 保存失敗はログのみで一覧取得は成功させます。
 
 書き込み機能を追加する場合、影響する全キャッシュの更新または無効化が必要です。
 
