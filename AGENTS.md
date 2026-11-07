@@ -15,8 +15,7 @@
 - GASソースのリポジトリ上の正本は`gas/コード.js`とする(claspで本番と同期)。
 - GAS API契約を変更した場合は、`gas/コード.js`、呼び出し側、テスト、
   `docs/SPECIFICATION.md`を同時に更新する。
-- GAS変更を本番へ出すときは、GAS変更のコミットを先に単独でpushし、
-  GitHub ActionsのGASデプロイ成功を確認してからUI変更をpushする。
+- GAS変更は現行UIと後方互換に保つ(旧UI+新GASで動くこと)。
 - 書き込み処理では、影響するGASキャッシュを必ず無効化する。
 - 明細1件の更新・削除では、MessageIdだけを一意キーとして信用しない。
   同じメールから複数明細が作られる可能性を考慮し、日付・店舗名・金額も照合する
@@ -37,10 +36,11 @@
 ## Deployment Boundaries
 
 - `git push`やVercelデプロイは、ユーザーの明示的な承認後に実施する。
-- GASのデプロイは`main`へのpush(`gas/**`変更時)でGitHub Actionsが自動実行する
-  (`.github/workflows/deploy-gas.yml`、`clasp push` + 既存デプロイIDへの`clasp deploy`)。
-- Web UIを先にデプロイすると、新しいGASアクションが未提供で失敗する場合がある。
-  GAS変更とそれに依存するUI変更は別コミットに分け、GAS→UIの順にpushする。
+- `main`へのpush(ユーザー承認後)で`.github/workflows/deploy.yml`が test → GAS(gas/差分時、
+  `?action=version`で反映確認)→ Environment `production` の承認 → Vercel の順に実行する。
+  GAS変更とUI変更は同じpushでよい(GAS変更は別コミットに分けておく)。
+- 手動の`npx vercel --prod`は使わない(承認ゲートを迂回しパイプラインと競合する)。
+  VercelのGit連携は無効のまま維持する。
 
 <!-- BEGIN DEV-KNOWLEDGE:shared-ai-workflow -->
 ## Shared AI workflow
