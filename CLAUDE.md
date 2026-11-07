@@ -43,8 +43,9 @@ npm run build  # next build
 - Spreadsheet ID・LINE ID・アクセストークン・実取引情報・パスワードをリポジトリに保存しない。
 - GAS ソースの正本は `gas/コード.js`(clasp で本番と同期)。GAS API 契約の変更は
   `gas/コード.js`・呼び出し側・テスト・`docs/SPECIFICATION.md` を同時に更新する。
-- デプロイは push 1回で `.github/workflows/deploy.yml` が test → GAS → 反映確認 → `production` 承認 → Vercel を実行する。
-  push はユーザーの明示承認後、本番(Vercel)反映は GitHub Environment の承認で止まる。手動 `npx vercel --prod` は使わない。
+- デプロイは push 1回で `.github/workflows/deploy.yml` が test → GAS → 反映確認 → Vercel を自動で実行する
+  (Environment `production` に承認者は設定しない)。**`main` への push が唯一の承認ゲート**なので、
+  push は必ずユーザーの明示承認後に行う。手動 `npx vercel --prod` は使わない。
 - GAS 変更は旧 UI と後方互換に保ち、UI 変更とは別コミットにする。
 - 書き込み処理では影響する GAS キャッシュ(`clearCache`)と Next.js の `expenses` タグを必ず無効化する。
 - 明細1件の更新・削除で MessageId を唯一のキーとして信用しない(同一メールから複数明細が生成される)。

@@ -19,8 +19,8 @@ or deployment flow. That specification is the design source of truth.
 6. Keep the GAS change backward compatible with the currently deployed UI (old UI + new GAS
    must work). Pushing to `main` (after the user approves the push) runs
    `.github/workflows/deploy.yml`: test → GAS deploy when `gas/` differs from the build the
-   live Web App reports (`?action=version`) → verify the new build → wait for approval on the
-   `production` environment → Vercel deploy. GAS and UI changes may go in the same push.
+   live Web App reports (`?action=version`) → verify the new build → Vercel deploy
+   (no reviewer on the `production` environment: the push itself is the only approval gate). GAS and UI changes may go in the same push.
 7. Keep the line `const GAS_BUILD = 'dev';` exactly as is: the workflow replaces it with the
    commit SHA before `clasp push`.
 

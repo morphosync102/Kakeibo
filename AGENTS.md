@@ -37,9 +37,10 @@
 
 - `git push`やVercelデプロイは、ユーザーの明示的な承認後に実施する。
 - `main`へのpush(ユーザー承認後)で`.github/workflows/deploy.yml`が test → GAS(gas/差分時、
-  `?action=version`で反映確認)→ Environment `production` の承認 → Vercel の順に実行する。
+  `?action=version`で反映確認)→ Vercel の順に自動で実行する(Environment `production` は
+  Vercel用Secretの保管場所で、承認者は設定しない)。`main`へのpushが唯一の承認ゲートである。
   GAS変更とUI変更は同じpushでよい(GAS変更は別コミットに分けておく)。
-- 手動の`npx vercel --prod`は使わない(承認ゲートを迂回しパイプラインと競合する)。
+- 手動の`npx vercel --prod`は使わない(パイプラインを迂回し競合する)。
   VercelのGit連携は無効のまま維持する。
 
 <!-- BEGIN DEV-KNOWLEDGE:shared-ai-workflow -->

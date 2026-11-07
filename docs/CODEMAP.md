@@ -47,7 +47,7 @@
 | `lib/write-queue.ts` | クライアント書き込みの直列化。`postWrite()` が `/api/expenses` への POST(`keepalive`、45秒タイムアウト。時間切れは失敗確定ではない `WriteTimeoutError`)を1本の Promise チェーンで順に送る(失敗・時間切れでも次を送る)。未完了数の購読/取得と完了数、取得結果を適用してよいかの判定 `shouldApplyFetch()`、破棄後の動作 `fetchDiscardAction()` |
 | `gas/コード.js` | **GAS ソースの正本**(約900行、clasp で本番と同期)。変更時は `.agents/skills/kakeibo-gas/SKILL.md` の手順に従う |
 | `gas/appsscript.json` | GAS マニフェスト(タイムゾーン・Web アプリ設定) |
-| `.github/workflows/deploy.yml` | main への push で test → GAS(稼働中ビルドから `gas/` に差分がある時のみ。`GAS_BUILD` に SHA を埋めて clasp push/deploy → `?action=version` で確認)→ `production` 承認 → Vercel(prebuilt)本番デプロイ |
+| `.github/workflows/deploy.yml` | main への push で test → GAS(稼働中ビルドから `gas/` に差分がある時のみ。`GAS_BUILD` に SHA を埋めて clasp push/deploy → `?action=version` で確認)→ Vercel(prebuilt)本番デプロイ(承認者なし、push が承認ゲート) |
 | `scripts/gas-build.mjs` | 稼働中 GAS の `?action=version` を問い合わせてビルド SHA だけを出力(応答本文・key は出さない) |
 | `test/*.test.mjs` | `node --test`。`gas-*.test.mjs` は VM sandbox で `gas/コード.js` を評価して回帰テスト |
 | `test/statistics-search.browser.mjs` | `npm run test:e2e`。架空APIによる両source・期間切替・検索・編集削除・レスポンシブなモーダル操作のブラウザー回帰 |

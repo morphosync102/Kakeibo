@@ -380,13 +380,13 @@ GASの変更には、VM sandboxを使う`test/gas-*.test.mjs`で回帰テスト�
      `clasp push` → 既存デプロイIDへ`clasp deploy`(URLは不変)し、`?action=version`が
      そのSHAを返すことを確認します(最大約1分リトライ)。確認できなければ失敗し、Vercelへは進みません。
    - 問い合わせは`scripts/gas-build.mjs`が行い、応答本文やkeyはログに出しません。
-3. **vercel**(test成功かつgasが成功/スキップ): GitHub Environment`production`の承認待ちで停止し、
-   承認後に`vercel pull --environment=production` → `vercel build --prod` → `vercel deploy --prebuilt --prod`
+3. **vercel**(test成功かつgasが成功/スキップ): GitHub Environment`production`(Vercel用Secretを保持、承認者なし)で
+   `vercel pull --environment=production` → `vercel build --prod` → `vercel deploy --prebuilt --prod`
    (Vercel CLIはバージョン固定)を実行します。
 
 GAS変更とUI変更は同じpushに含めてかまいません(GASの確認後にUIが出ます)。
-ただし`git push`はユーザーの明示承認後に行い、本番反映はEnvironmentの承認で止まります。
-docsだけの変更でもvercel jobは承認待ちになります(承認しなければ反映されません)。
+`main`へのpushがそのまま本番反映になるため、`git push`は必ずユーザーの明示承認後に行います(唯一の承認ゲート)。
+docsだけの変更でもVercelへ再デプロイされます。
 
 `?action=version`(doGet)は読み取り専用で`{ "build": "<commit SHA>" }`だけを返し、
 プロキシ認証(`PROXY_SECRET`)の対象です。ローカルの`clasp push`では`dev`のままです。
@@ -403,17 +403,15 @@ docsだけの変更でもvercel jobは承認待ちになります(承認しな�
 | Secret | `VERCEL_TOKEN` | Vercelのアクセストークン |
 | Secret | `VERCEL_ORG_ID` | Vercelのチーム/ユーザーID(`.vercel/project.json`の`orgId`) |
 | Secret | `VERCEL_PROJECT_ID` | VercelのプロジェクトID(`.vercel/project.json`の`projectId`) |
-| Environment | `production` | 「Required reviewers」に本人を設定(承認ゲート)。Vercel用SecretはEnvironment secretでも可 |
+| Environment | `production` | Vercel用Secret(`VERCEL_*`)を保持。Required reviewers は設定しない(2026-11-08 自動化) |
 | Vercel | Git連携 | **無効のまま**にする(有効だとpushで並行デプロイされ、GAS→UIの順序が崩れる) |
 
 旧ワークフロー`deploy-gas.yml`は`deploy.yml`に統合して削除しました。
 
 注意:
 
-- 上記の設定(特に Required reviewers)を済ませる前に`deploy.yml`を push しないこと。未設定だと承認なしで本番に反映される。
-- 承認しない実行は放置せず「Reject」する(承認待ちの実行が concurrency を占有し、後続の push が待たされる)。
-- GAS は承認ゲートより前に自動デプロイされる(旧`deploy-gas.yml`と同じ挙動)。GAS も承認後にしたい場合は gas job にも
-  `environment: production`を付ける。
+- 承認ゲートを戻したい場合は、Environment `production` に Required reviewers を設定するだけでよい
+  (ワークフローの変更は不要。承認しない実行は放置せず「Reject」する)。
 
 #### ロールバック
 
