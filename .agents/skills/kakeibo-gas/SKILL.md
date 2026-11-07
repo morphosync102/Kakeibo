@@ -47,8 +47,10 @@ editor (idempotent; creates only missing sheets with the headers below), and upd
 ## Actor verification (doGet / doPost)
 
 Order: `key` check → `normalizeSource` → `authorizeDataRequest(params, source)` → action. Nothing is read or
-written before all three pass. The proxy sends `actorUserId` / `actorEpoch`; the actor is trusted only when
-`PROXY_SECRET` is set (otherwise `Unauthorized`). Errors: `Invalid actor`, `Forbidden` (no actor where one is
+written before all three pass. The proxy sends `actorUserId` / `actorEpoch`; any actor field is trusted only
+with a valid `authKey` (`isAuthProxyRequest`: equals Script Property `AUTH_PROXY_SECRET`, PROXY_SECRET also
+set), otherwise `Unauthorized`. `key` alone never vouches for an actor: the production `/api/expenses`
+proxy forwards browser bodies and re-adds `key`. Errors: `Invalid actor`, `Forbidden` (no actor where one is
 required, or source not in the user's `sources`), `SessionRevoked` (unknown / not active / epoch mismatch),
 `AuthUnavailable` (`Auth_Users` missing or unreadable: fail closed). `AUTHZ_ENFORCE=1` requires an actor on
 every data request; while unset, requests without actor keep working for main / yahoo (current UI).
@@ -70,6 +72,29 @@ internal functions (`getTargetSheets`, `getCacheSourceKey` / `clearCache`, `proc
 `sendMonthlyKakeiboReportForSource`) require an exact registry id and throw otherwise.
 `processFixedCosts` / `sendMonthlyKakeiboReports` loop over the registry with a try/catch per source and rethrow
 the failed sources at the end. Fixed costs skip a source whose sheets do not exist before taking the lock.
+
+## Auth (users, passkeys, invites)
+
+Contract and error codes: `docs/SPECIFICATION.md` §4 「認証API」. Rules when changing it:
+
+- GAS never verifies WebAuthn signatures; Next.js sends verified results. GAS enforces one-time invites,
+  one-time challenges (`recordChallengeOnce`, Script Cache 5 min, inside the lock), epochs and user status.
+- Auth actions (`AUTH_ACTIONS`) are dispatched in `doPost` before source validation and need `key` AND
+  `authKey` (`isAuthProxyRequest`); otherwise `Unauthorized` without reading anything. Only the new
+  `/api/auth/*` routes send `authKey`. Unexpected exceptions return only `AuthError`. Never log `authKey`.
+- `addUser` is idempotent (same name, role, sources, homeSource -> existing userId).
+- No Web action may act on another user. Invites, user changes and other users' passkeys are editor
+  functions (`setupAuthSheets`, `addUser`, `disableUser`, `bumpEpoch`, `createInvite`, `revokeCredential`,
+  `listUsers`, plus argument-free wrappers such as `addYukiUser` / `createAdminRecoveryInvite`).
+- Every auth write runs under the script lock and re-reads the sheets inside it. After writing
+  `Auth_Users` call `clearAuthUsersCache()` before the lock is released. Changing a user's access
+  (revocation, disable) must bump the epoch.
+- Store only the SHA-256 of invite tokens; the invite URL goes to the execution log only (`APP_ORIGIN`).
+  Never log tokens, token hashes, the proxy key or public keys.
+- Nothing written to `Auth_*` may start with `= + - @`: validate free text (`validateSheetText`) and store
+  base64url values with the `b64u:` prefix (`toSheetBase64Url`).
+- Random values come from `newRandomBytes()` (SHA-256 over 4 UUIDs + time + Math.random), because
+  `Utilities.getUuid()` is not documented as cryptographically secure.
 
 ## Spreadsheet
 
@@ -152,6 +177,9 @@ Never insert columns before H: code depends on column numbers (G = Type).
 - POST `updateCategory` (category group of the source ∩ the actor's sources; see Actor verification)
 - POST `addFixedCost`
 - POST `deleteFixedCost`
+- POST auth actions (no source): `authGetAdminUser`, `authPeekInvite`, `authConsumeInviteAndAddCredential`,
+  `authAddCredential`, `authGetCredential`, `authRecordCredentialUse`, `authListCredentials`,
+  `authRevokeCredential`, `authBumpEpoch` (see Auth)
 
 When adding or changing an action, update the caller, GAS implementation, tests, and
 `docs/SPECIFICATION.md` together.
@@ -213,7 +241,11 @@ Script Properties required:
 - `LINE_DESTINATION_YUKI` (optional until Yuki links LINE)
 - `PROXY_SECRET` (optional during migration: shared secret checked as `key`; must equal Vercel `GAS_PROXY_SECRET`;
   required for any request carrying an actor)
+- `AUTH_PROXY_SECRET` (a different value from `PROXY_SECRET`; checked as `authKey`; must equal Vercel
+  `GAS_AUTH_PROXY_SECRET`; required for auth actions and any request carrying an actor; set it after the
+  GAS push, old proxies never send `authKey`)
 - `AUTHZ_ENFORCE` (optional, not secret: `1` requires an actor on every data request)
+- `APP_ORIGIN` (not secret: `https://<domain>` without a path; required by `createInvite`)
 
 Never store these values in the repository, project skills, tests, or documentation:
 

@@ -131,9 +131,29 @@ function isAuthorizedRequest(key) {
 }
 
 // True when PROXY_SECRET is set, i.e. a request that passed
-// isAuthorizedRequest really came from the proxy. Only then is `actor` trusted.
+// isAuthorizedRequest really came from a proxy.
 function isProxySecretConfigured() {
   return Boolean(PropertiesService.getScriptProperties().getProperty('PROXY_SECRET'));
+}
+
+// --- Helper: auth proxy authentication ---
+// `key` (PROXY_SECRET) is added by every version of the /api/expenses proxy,
+// including the one in production before the passkey UI, which forwards the
+// browser's body as is. So `key` alone cannot vouch for an actor or an auth
+// action: any logged-in browser could send them through that proxy. Auth
+// actions and requests carrying an actor therefore also need `authKey`
+// (body for doPost, query for doGet), compared with Script Property
+// AUTH_PROXY_SECRET (a different value from PROXY_SECRET). Only the new
+// /api/auth/* routes and the new actor-adding proxy path send it (Vercel
+// GAS_AUTH_PROXY_SECRET); old proxies never do. Unset -> always false.
+// Requires PROXY_SECRET as well (no migration pass-through). Never logs keys.
+function isAuthProxyRequest(params) {
+  if (!isProxySecretConfigured()) return false;
+  const secret = PropertiesService.getScriptProperties().getProperty('AUTH_PROXY_SECRET');
+  if (!secret) return false;
+  const authKey = params.authKey;
+  if (typeof authKey !== 'string' || authKey === '') return false;
+  return constantTimeEquals(authKey, secret);
 }
 
 // Compares SHA-256 digests of both values over all 32 bytes, so the time taken
@@ -177,21 +197,22 @@ function getSourceConfig(source) {
 // isAuthorizedRequest and normalizeSource, before any sheet is read or written.
 // Returns {actor: null} (legacy request without actor, allowed),
 // {actor: {userId, epoch, sources}} or {error}:
+// - any actor field without a valid authKey (old proxy path, or
+//   PROXY_SECRET / AUTH_PROXY_SECRET unset: cannot be trusted) -> 'Unauthorized'
 // - malformed actor (only one field, bad id or epoch)  -> 'Invalid actor'
 // - no actor, and the source requiresActor or Script Property
 //   AUTHZ_ENFORCE is '1'                                -> 'Forbidden'
-// - actor while PROXY_SECRET is unset (cannot be trusted) -> 'Unauthorized'
 // - Auth_Users missing / unreadable (fail closed)      -> 'AuthUnavailable'
 // - unknown user, status not active, epoch mismatch    -> 'SessionRevoked'
 // - source not in the user's sources                   -> 'Forbidden'
 function authorizeDataRequest(params, source) {
+  if (hasActorFields(params) && !isAuthProxyRequest(params)) return {error: 'Unauthorized'};
   const parsed = readActorParams(params);
   if (parsed.error) return {error: parsed.error};
   if (!parsed.actor) {
     if (getSourceConfig(source).requiresActor || isAuthzEnforced()) return {error: 'Forbidden'};
     return {actor: null};
   }
-  if (!isProxySecretConfigured()) return {error: 'Unauthorized'};
 
   const table = getAuthUsers();
   if (table.error) return {error: table.error};
@@ -207,6 +228,11 @@ function authorizeDataRequest(params, source) {
 // Unset (migration period): requests without actor keep working for main / yahoo.
 function isAuthzEnforced() {
   return PropertiesService.getScriptProperties().getProperty('AUTHZ_ENFORCE') === '1';
+}
+
+function hasActorFields(params) {
+  const isAbsent = value => value === undefined || value === null || value === '';
+  return !isAbsent(params.actorUserId) || !isAbsent(params.actorEpoch);
 }
 
 // Reads actorUserId / actorEpoch from a doGet query (strings) or doPost body.
@@ -813,6 +839,9 @@ function doPost(e) {
 
     // LINE calls the webhook directly (no key); every other request is authenticated
     if (!isAuthorizedRequest(params.key)) return responseJSON({error: 'Unauthorized'});
+
+    // Auth actions carry no source; they require PROXY_SECRET (see handleAuthAction)
+    if (AUTH_ACTIONS.indexOf(params.action) !== -1) return responseJSON(handleAuthAction(params));
 
     const source = normalizeSource(params.source); // a SOURCES id | null
     if (!source) return responseJSON({error: 'Invalid source'});
@@ -1837,4 +1866,860 @@ function formatMonthlyReportDiff(amount) {
   const rounded = Math.round(amount);
   const prefix = rounded >= 0 ? '+' : '-';
   return `${prefix}${formatMonthlyReportCurrency(Math.abs(rounded))}`;
+}
+
+// =====================================================================
+// --- Auth: users, passkeys, invites (design 2026-11-yuki-and-passkeys §3, §5.6) ---
+// GAS never verifies WebAuthn signatures: the Next.js server verifies the
+// registration / authentication responses (@simplewebauthn/server) and sends
+// only the verified results here. GAS stores them, enforces one-time invites,
+// one-time challenges and epochs, and is the source of truth for users.
+//
+// Sheets (created by setupAuthSheets; columns located by header name):
+// - Auth_Users: AUTH_USERS_HEADERS (see the user table section above)
+// - Auth_Credentials: AUTH_CREDENTIALS_HEADERS. credentialId / publicKey are
+//   base64url (publicKey = COSE key) stored with the SHEET_B64U_PREFIX so a
+//   value starting with "-" is never taken for a formula; counter is a number;
+//   transports comma separated; revokedAt set = revoked (rows are not deleted).
+// - Auth_Invites: AUTH_INVITES_HEADERS. Only the SHA-256 (hex) of the invite
+//   token is stored; the token itself exists only in the editor's execution
+//   log (createInvite) and in the invite URL fragment.
+// Every write runs under the script lock; Auth_Users writes then call
+// clearAuthUsersCache() before the lock is released (contract with the actor
+// check of the data actions). No cell starts with = + - @ (free text is
+// validated, generated values never do).
+
+const AUTH_CREDENTIALS_SHEET_NAME = 'Auth_Credentials';
+const AUTH_CREDENTIALS_HEADERS = Object.freeze(['credentialId', 'userId', 'publicKey', 'counter', 'transports', 'deviceType', 'backedUp', 'label', 'createdAt', 'lastUsedAt', 'revokedAt']);
+const AUTH_INVITES_SHEET_NAME = 'Auth_Invites';
+const AUTH_INVITES_HEADERS = Object.freeze(['inviteId', 'tokenHash', 'userId', 'purpose', 'expiresAt', 'createdBy', 'usedAt']);
+
+// Web actions (POST only; key AND authKey required, see isAuthProxyRequest). None of them acts on
+// another user: invites, user changes and other users' passkeys are editor
+// functions only.
+const AUTH_ACTIONS = Object.freeze([
+  'authGetAdminUser',
+  'authPeekInvite',
+  'authConsumeInviteAndAddCredential',
+  'authAddCredential',
+  'authGetCredential',
+  'authRecordCredentialUse',
+  'authListCredentials',
+  'authRevokeCredential',
+  'authBumpEpoch'
+]);
+
+const INVITE_PURPOSES = Object.freeze(['register', 'recovery']);
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
+const ADMIN_RECOVERY_INVITE_TTL_MS = 10 * 60 * 1000;
+const CHALLENGE_CACHE_PREFIX = 'kakeibo_auth_challenge_';
+const CHALLENGE_TTL_SECONDS = 300;
+const SHEET_B64U_PREFIX = 'b64u:';
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+const MAX_CREDENTIAL_ID_LENGTH = 1364; // 1023 bytes (WebAuthn maximum) in base64url
+const MAX_PUBLIC_KEY_LENGTH = 4096;
+const MAX_COUNTER = 4294967295;
+const WEBAUTHN_TRANSPORTS = Object.freeze(['usb', 'nfc', 'ble', 'internal', 'hybrid', 'cable', 'smart-card']);
+const WEBAUTHN_DEVICE_TYPES = Object.freeze(['singleDevice', 'multiDevice']);
+const MAX_NAME_LENGTH = 40;
+const DEFAULT_PASSKEY_LABEL = 'パスキー';
+
+// --- Auth: random values ---
+// Apps Script does not document how Utilities.getUuid() generates its values
+// (in particular not that it uses a cryptographically secure generator), and
+// there is no other random API. Four UUIDs, the time and Math.random() are
+// therefore hashed together with SHA-256: the 32-byte output is at least as
+// unpredictable as the best of these inputs (4 x 122 random bits if getUuid is
+// a random v4 UUID as it appears to be) and never weaker than one UUID.
+function newRandomBytes() {
+  const seed = [
+    Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(), Utilities.getUuid(),
+    String(Date.now()), String(Math.random())
+  ].join('|');
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, seed, Utilities.Charset.UTF_8);
+}
+
+function toBase64UrlNoPadding(bytes) {
+  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, '');
+}
+
+// 256-bit secret token (43 base64url characters), for invite links
+function newRandomToken() {
+  return toBase64UrlNoPadding(newRandomBytes());
+}
+
+// Opaque 128-bit id such as u_xxxxxxxxxxxxxxxxxxxxxx (22 base64url characters)
+function newOpaqueId(prefix) {
+  return prefix + toBase64UrlNoPadding(newRandomBytes().slice(0, 16));
+}
+
+function sha256Hex(text) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8)
+    .map(b => ((b + 256) % 256).toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// --- Auth: sheet tables ---
+
+function getAuthSheet(name) {
+  return SpreadsheetApp.openById(SHEET_ID).getSheetByName(name);
+}
+
+// Reads a sheet whose first row holds `headers` (in any order, extra columns
+// allowed). Returns {sheet, rows, get, set, append} or null when the sheet
+// is missing. Throws when a column is missing.
+function readAuthTable(name, headers) {
+  const sheet = getAuthSheet(name);
+  if (!sheet) return null;
+  const values = sheet.getLastRow() > 0 ? sheet.getDataRange().getValues() : [];
+  if (values.length === 0) throw new Error(`${name} has no header row`);
+  const header = values[0].map(cell => String(cell).trim());
+  const index = {};
+  headers.forEach(name2 => {
+    index[name2] = header.indexOf(name2);
+    if (index[name2] === -1) throw new Error(`${name}: column "${name2}" is missing`);
+  });
+  const width = header.length;
+  const rows = values.slice(1).map((cells, i) => ({rowNumber: i + 2, cells: cells}));
+  return {
+    sheet: sheet,
+    rows: rows,
+    get: (row, column) => row.cells[index[column]],
+    text: (row, column) => {
+      const value = row.cells[index[column]];
+      return value === undefined || value === null ? '' : String(value).trim();
+    },
+    set: (row, column, value) => {
+      sheet.getRange(row.rowNumber, index[column] + 1).setValue(value);
+      row.cells[index[column]] = value;
+    },
+    append: (record) => {
+      const cells = [];
+      for (let i = 0; i < width; i++) cells.push('');
+      Object.keys(record).forEach(column => { cells[index[column]] = record[column]; });
+      sheet.appendRow(cells);
+      rows.push({rowNumber: rows.length + 2, cells: cells});
+    }
+  };
+}
+
+// Users of Auth_Users as {table, list, byId} or {error: 'AuthUnavailable'}.
+// Same rules as the data-side parseAuthUsers: a userId on several rows is
+// ignored entirely, rows with an invalid userId or epoch are ignored.
+function loadAuthUsers() {
+  let table;
+  try {
+    table = readAuthTable(AUTH_USERS_SHEET_NAME, AUTH_USERS_HEADERS);
+  } catch (err) {
+    console.error(`${AUTH_USERS_SHEET_NAME} could not be read: ${err.message}`);
+    return {error: 'AuthUnavailable'};
+  }
+  if (!table) return {error: 'AuthUnavailable'};
+  const count = Object.create(null);
+  table.rows.forEach(row => {
+    const id = table.text(row, 'userId');
+    if (id !== '') count[id] = (count[id] || 0) + 1;
+  });
+  const list = [];
+  const byId = Object.create(null);
+  table.rows.forEach(row => {
+    const userId = table.text(row, 'userId');
+    if (userId === '' || count[userId] > 1 || !ACTOR_USER_ID_PATTERN.test(userId)) return;
+    const rawEpoch = table.get(row, 'epoch');
+    const epoch = parseEpoch(typeof rawEpoch === 'number' ? rawEpoch : String(rawEpoch).trim());
+    if (epoch === null) return;
+    const user = {
+      row: row,
+      userId: userId,
+      displayName: table.text(row, 'displayName'),
+      role: table.text(row, 'role'),
+      sources: table.text(row, 'sources').split(',').map(s => s.trim()).filter(isSourceId),
+      homeSource: table.text(row, 'homeSource'),
+      epoch: epoch,
+      status: table.text(row, 'status')
+    };
+    list.push(user);
+    byId[userId] = user;
+  });
+  return {table: table, list: list, byId: byId};
+}
+
+function loadAuthCredentials() {
+  try {
+    return readAuthTable(AUTH_CREDENTIALS_SHEET_NAME, AUTH_CREDENTIALS_HEADERS);
+  } catch (err) {
+    console.error(`${AUTH_CREDENTIALS_SHEET_NAME} could not be read: ${err.message}`);
+    return null;
+  }
+}
+
+function loadAuthInvites() {
+  try {
+    return readAuthTable(AUTH_INVITES_SHEET_NAME, AUTH_INVITES_HEADERS);
+  } catch (err) {
+    console.error(`${AUTH_INVITES_SHEET_NAME} could not be read: ${err.message}`);
+    return null;
+  }
+}
+
+// The fields a session needs (no status / role)
+function toSessionUser(user) {
+  return {
+    userId: user.userId,
+    displayName: user.displayName,
+    sources: user.sources.slice(),
+    homeSource: user.homeSource,
+    epoch: user.epoch
+  };
+}
+
+function bumpUserEpoch(users, user) {
+  const epoch = user.epoch + 1;
+  users.table.set(user.row, 'epoch', epoch);
+  users.table.set(user.row, 'updatedAt', new Date().toISOString());
+  user.epoch = epoch;
+  return epoch;
+}
+
+function toSheetBase64Url(value) {
+  return SHEET_B64U_PREFIX + value;
+}
+
+function fromSheetBase64Url(value) {
+  const text = value === undefined || value === null ? '' : String(value).trim();
+  return text.indexOf(SHEET_B64U_PREFIX) === 0 ? text.slice(SHEET_B64U_PREFIX.length) : text;
+}
+
+function credentialIdOf(credentials, row) {
+  return fromSheetBase64Url(credentials.get(row, 'credentialId'));
+}
+
+function isRevokedCredential(credentials, row) {
+  return credentials.text(row, 'revokedAt') !== '';
+}
+
+// Rows with exactly this credential id (revoked or not)
+function findCredentialRows(credentials, credentialId) {
+  return credentials.rows.filter(row => credentialIdOf(credentials, row) === credentialId);
+}
+
+function activeCredentialsOf(credentials, userId) {
+  return credentials.rows.filter(row =>
+    credentials.text(row, 'userId') === userId && !isRevokedCredential(credentials, row));
+}
+
+function toTimestamp(value) {
+  if (value instanceof Date) return value.getTime();
+  const time = Date.parse(String(value));
+  return isNaN(time) ? null : time;
+}
+
+// --- Auth: input validation ---
+
+function isSha256Hex(value) {
+  return typeof value === 'string' && SHA256_HEX_PATTERN.test(value);
+}
+
+function isBase64Url(value, maxLength) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength && BASE64URL_PATTERN.test(value);
+}
+
+// Free text written to a sheet: trimmed, 1..MAX_NAME_LENGTH characters, no
+// control characters, and never starting with = + - @ (formula injection).
+// Returns the trimmed value or null.
+function validateSheetText(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (text.length === 0 || text.length > MAX_NAME_LENGTH) return null;
+  if (/^[=+\-@]/.test(text) || /[\u0000-\u001f\u007f]/.test(text)) return null;
+  return text;
+}
+
+function isValidCounter(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_COUNTER;
+}
+
+// The verified registration result sent by the proxy. Returns the normalized
+// credential or null.
+function validateCredentialInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  if (!isBase64Url(input.credentialId, MAX_CREDENTIAL_ID_LENGTH)) return null;
+  if (!isBase64Url(input.publicKey, MAX_PUBLIC_KEY_LENGTH)) return null;
+  if (!isValidCounter(input.counter)) return null;
+  let transports = [];
+  if (input.transports !== undefined) {
+    if (!Array.isArray(input.transports) || input.transports.length > WEBAUTHN_TRANSPORTS.length) return null;
+    if (!input.transports.every(t => WEBAUTHN_TRANSPORTS.indexOf(t) !== -1)) return null;
+    transports = input.transports.filter((t, i, all) => all.indexOf(t) === i);
+  }
+  if (input.deviceType !== undefined && WEBAUTHN_DEVICE_TYPES.indexOf(input.deviceType) === -1) return null;
+  if (input.backedUp !== undefined && typeof input.backedUp !== 'boolean') return null;
+  let label = DEFAULT_PASSKEY_LABEL;
+  if (input.label !== undefined) {
+    label = validateSheetText(input.label);
+    if (label === null) return null;
+  }
+  return {
+    credentialId: input.credentialId,
+    publicKey: input.publicKey,
+    counter: input.counter,
+    transports: transports,
+    deviceType: input.deviceType || '',
+    backedUp: input.backedUp === true,
+    label: label
+  };
+}
+
+function appendCredentialRow(credentials, userId, credential) {
+  credentials.append({
+    credentialId: toSheetBase64Url(credential.credentialId),
+    userId: userId,
+    publicKey: toSheetBase64Url(credential.publicKey),
+    counter: credential.counter,
+    transports: credential.transports.join(','),
+    deviceType: credential.deviceType,
+    backedUp: credential.backedUp,
+    label: credential.label,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: '',
+    revokedAt: ''
+  });
+}
+
+// --- Auth: one-time challenges (§3.4) ---
+// Must be called while holding the script lock. Returns false when the
+// challenge hash was already recorded (reuse), otherwise records it for
+// CHALLENGE_TTL_SECONDS and returns true. If the cache is unavailable the
+// request proceeds (logged): the 5-minute signed challenge cookie of the
+// Next.js side remains the defence, as the design accepts.
+function recordChallengeOnce(challengeHash) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = CHALLENGE_CACHE_PREFIX + challengeHash;
+    if (cache.get(key) !== null) return false;
+    cache.put(key, '1', CHALLENGE_TTL_SECONDS);
+  } catch (err) {
+    console.warn(`Challenge record unavailable (reuse not checked): ${err}`);
+  }
+  return true;
+}
+
+// --- Auth: Web actions ---
+
+// Called by doPost for AUTH_ACTIONS, after the key check. Never throws and
+// never returns internal error text (generic 'AuthError').
+function handleAuthAction(params) {
+  // Only the auth proxy (authKey); `key` alone can come through the old
+  // /api/expenses proxy from any logged-in browser. No migration pass-through.
+  if (!isAuthProxyRequest(params)) return {error: 'Unauthorized'};
+  try {
+    switch (params.action) {
+      case 'authGetAdminUser': return authGetAdminUser();
+      case 'authPeekInvite': return authPeekInvite(params);
+      case 'authConsumeInviteAndAddCredential': return authConsumeInviteAndAddCredential(params);
+      case 'authAddCredential': return authAddCredential(params);
+      case 'authGetCredential': return authGetCredential(params);
+      case 'authRecordCredentialUse': return authRecordCredentialUse(params);
+      case 'authListCredentials': return authListCredentials(params);
+      case 'authRevokeCredential': return authRevokeCredential(params);
+      case 'authBumpEpoch': return authBumpEpoch(params);
+      default: return {error: 'Unknown action'};
+    }
+  } catch (err) {
+    console.error(`${params.action} failed: ${err}`);
+    return {error: 'AuthError'};
+  }
+}
+
+function runAuthWrite(fn) {
+  return runWithScriptLock(fn, () => ({error: 'Busy'}));
+}
+
+// The actor (actorUserId / actorEpoch) of an auth action is mandatory and
+// checked against the sheet (not the cache). Returns {user} or {error}.
+function requireAuthActor(params, users) {
+  const parsed = readActorParams(params);
+  if (parsed.error || !parsed.actor) return {error: 'Invalid actor'};
+  const user = users.byId[parsed.actor.userId];
+  if (!user || user.status !== 'active' || user.epoch !== parsed.actor.epoch) return {error: 'SessionRevoked'};
+  return {user: user};
+}
+
+// Password login during the migration (§3.10): the single active admin.
+function authGetAdminUser() {
+  const users = loadAuthUsers();
+  if (users.error) return users;
+  const admins = users.list.filter(user => user.role === 'admin' && user.status === 'active');
+  if (admins.length === 0) return {error: 'AdminNotFound'};
+  if (admins.length > 1) return {error: 'AdminAmbiguous'};
+  const user = toSessionUser(admins[0]);
+  return {success: true, user: {userId: user.userId, displayName: user.displayName, role: 'admin', sources: user.sources, homeSource: user.homeSource, epoch: user.epoch}};
+}
+
+// The invite row for tokenHash if it is usable now (unused, not expired, for
+// an active user), else null. `users` / `invites` are loaded tables.
+function findUsableInvite(invites, users, tokenHash) {
+  const rows = invites.rows.filter(row => invites.text(row, 'tokenHash') === tokenHash);
+  if (rows.length !== 1) return null;
+  const row = rows[0];
+  if (invites.text(row, 'usedAt') !== '') return null;
+  if (INVITE_PURPOSES.indexOf(invites.text(row, 'purpose')) === -1) return null;
+  const expiresAt = toTimestamp(invites.get(row, 'expiresAt'));
+  if (expiresAt === null || Date.now() >= expiresAt) return null;
+  const user = users.byId[invites.text(row, 'userId')];
+  if (!user || user.status !== 'active') return null;
+  return {row: row, user: user, purpose: invites.text(row, 'purpose')};
+}
+
+// register/options: is the invite usable? Does not consume it.
+function authPeekInvite(params) {
+  if (!isSha256Hex(params.tokenHash)) return {error: 'Invalid input'};
+  const users = loadAuthUsers();
+  if (users.error) return users;
+  const invites = loadAuthInvites();
+  const credentials = loadAuthCredentials();
+  if (!invites || !credentials) return {error: 'AuthUnavailable'};
+  const invite = findUsableInvite(invites, users, params.tokenHash);
+  if (!invite) return {error: 'InviteInvalid'};
+  return {
+    success: true,
+    purpose: invite.purpose,
+    user: {userId: invite.user.userId, displayName: invite.user.displayName},
+    // For excludeCredentials (no second registration of the same device)
+    credentials: activeCredentialsOf(credentials, invite.user.userId).map(row => ({
+      credentialId: credentialIdOf(credentials, row),
+      transports: credentials.text(row, 'transports').split(',').filter(Boolean)
+    }))
+  };
+}
+
+// register/verify: consume the invite and add the verified passkey,
+// atomically under the script lock (one-time invite, one-time challenge).
+function authConsumeInviteAndAddCredential(params) {
+  const credential = validateCredentialInput(params.credential);
+  if (!isSha256Hex(params.tokenHash) || !isSha256Hex(params.challengeHash) || !credential) {
+    return {error: 'Invalid input'};
+  }
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const invites = loadAuthInvites();
+    const credentials = loadAuthCredentials();
+    if (!invites || !credentials) return {error: 'AuthUnavailable'};
+    const invite = findUsableInvite(invites, users, params.tokenHash);
+    if (!invite) return {error: 'InviteInvalid'};
+    if (findCredentialRows(credentials, credential.credentialId).length > 0) return {error: 'CredentialExists'};
+    if (!recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
+    invites.set(invite.row, 'usedAt', new Date().toISOString());
+    appendCredentialRow(credentials, invite.user.userId, credential);
+    console.log(`Passkey registered via ${invite.purpose} invite for ${invite.user.userId}`);
+    return {success: true, user: toSessionUser(invite.user)};
+  });
+}
+
+// passkeys/add/verify: a re-authenticated user adds a passkey. bootstrap
+// (password re-entry instead of a passkey, §3.3/3.10) is allowed only for an
+// admin without any active passkey; otherwise at least one passkey must exist.
+function authAddCredential(params) {
+  const credential = validateCredentialInput(params.credential);
+  if (!isSha256Hex(params.challengeHash) || !credential ||
+      (params.bootstrap !== undefined && typeof params.bootstrap !== 'boolean')) {
+    return {error: 'Invalid input'};
+  }
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const credentials = loadAuthCredentials();
+    if (!credentials) return {error: 'AuthUnavailable'};
+    const actor = requireAuthActor(params, users);
+    if (actor.error) return actor;
+    const count = activeCredentialsOf(credentials, actor.user.userId).length;
+    if (params.bootstrap === true) {
+      if (actor.user.role !== 'admin' || count > 0) return {error: 'BootstrapNotAllowed'};
+    } else if (count === 0) {
+      return {error: 'NoExistingCredential'};
+    }
+    if (findCredentialRows(credentials, credential.credentialId).length > 0) return {error: 'CredentialExists'};
+    if (!recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
+    appendCredentialRow(credentials, actor.user.userId, credential);
+    console.log(`Passkey added for ${actor.user.userId}${params.bootstrap === true ? ' (bootstrap)' : ''}`);
+    return {success: true, credentialCount: count + 1};
+  });
+}
+
+// The active credential row and its active user, or null
+function findActiveCredential(credentials, users, credentialId) {
+  const rows = findCredentialRows(credentials, credentialId);
+  if (rows.length !== 1 || isRevokedCredential(credentials, rows[0])) return null;
+  const user = users.byId[credentials.text(rows[0], 'userId')];
+  if (!user || user.status !== 'active') return null;
+  return {row: rows[0], user: user};
+}
+
+// login/verify (and passkeys/add/reauth): the stored public key for verification
+function authGetCredential(params) {
+  if (!isBase64Url(params.credentialId, MAX_CREDENTIAL_ID_LENGTH)) return {error: 'Invalid input'};
+  const users = loadAuthUsers();
+  if (users.error) return users;
+  const credentials = loadAuthCredentials();
+  if (!credentials) return {error: 'AuthUnavailable'};
+  const found = findActiveCredential(credentials, users, params.credentialId);
+  if (!found) return {error: 'CredentialNotFound'};
+  const counter = Number(credentials.get(found.row, 'counter'));
+  return {
+    success: true,
+    credential: {
+      credentialId: params.credentialId,
+      userId: found.user.userId,
+      publicKey: fromSheetBase64Url(credentials.get(found.row, 'publicKey')),
+      counter: isValidCounter(counter) ? counter : 0,
+      transports: credentials.text(found.row, 'transports').split(',').filter(Boolean)
+    },
+    user: toSessionUser(found.user)
+  };
+}
+
+// After a verified authentication: one-time challenge, lastUsedAt, and the
+// counter when it increased (synced passkeys always report 0).
+function authRecordCredentialUse(params) {
+  if (!isBase64Url(params.credentialId, MAX_CREDENTIAL_ID_LENGTH) ||
+      !isValidCounter(params.counter) || !isSha256Hex(params.challengeHash)) {
+    return {error: 'Invalid input'};
+  }
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const credentials = loadAuthCredentials();
+    if (!credentials) return {error: 'AuthUnavailable'};
+    const found = findActiveCredential(credentials, users, params.credentialId);
+    if (!found) return {error: 'CredentialNotFound'};
+    if (!recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
+    credentials.set(found.row, 'lastUsedAt', new Date().toISOString());
+    const stored = Number(credentials.get(found.row, 'counter'));
+    if (!isValidCounter(stored) || params.counter > stored) credentials.set(found.row, 'counter', params.counter);
+    return {success: true};
+  });
+}
+
+// The actor's own active passkeys (no public keys)
+function authListCredentials(params) {
+  const users = loadAuthUsers();
+  if (users.error) return users;
+  const credentials = loadAuthCredentials();
+  if (!credentials) return {error: 'AuthUnavailable'};
+  const actor = requireAuthActor(params, users);
+  if (actor.error) return actor;
+  return {
+    success: true,
+    credentials: activeCredentialsOf(credentials, actor.user.userId).map(row => ({
+      credentialId: credentialIdOf(credentials, row),
+      label: credentials.text(row, 'label'),
+      deviceType: credentials.text(row, 'deviceType'),
+      backedUp: credentials.get(row, 'backedUp') === true || credentials.text(row, 'backedUp').toUpperCase() === 'TRUE',
+      createdAt: credentials.text(row, 'createdAt'),
+      lastUsedAt: credentials.text(row, 'lastUsedAt')
+    }))
+  };
+}
+
+// Revokes one of the actor's own passkeys and bumps the epoch (every session
+// of the actor, including this one, must log in again).
+function authRevokeCredential(params) {
+  if (!isBase64Url(params.credentialId, MAX_CREDENTIAL_ID_LENGTH)) return {error: 'Invalid input'};
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const credentials = loadAuthCredentials();
+    if (!credentials) return {error: 'AuthUnavailable'};
+    const actor = requireAuthActor(params, users);
+    if (actor.error) return actor;
+    const rows = findCredentialRows(credentials, params.credentialId).filter(row =>
+      credentials.text(row, 'userId') === actor.user.userId && !isRevokedCredential(credentials, row));
+    if (rows.length !== 1) return {error: 'CredentialNotFound'};
+    credentials.set(rows[0], 'revokedAt', new Date().toISOString());
+    const epoch = bumpUserEpoch(users, actor.user);
+    clearAuthUsersCache();
+    console.log(`Passkey revoked by ${actor.user.userId}; epoch is now ${epoch}`);
+    return {success: true, epoch: epoch};
+  });
+}
+
+// "Log out everywhere" for the actor
+function authBumpEpoch(params) {
+  return runAuthWrite(() => {
+    const users = loadAuthUsers();
+    if (users.error) return users;
+    const actor = requireAuthActor(params, users);
+    if (actor.error) return actor;
+    const epoch = bumpUserEpoch(users, actor.user);
+    clearAuthUsersCache();
+    return {success: true, epoch: epoch};
+  });
+}
+
+// --- Auth: editor functions (run by the sheet owner from the Apps Script editor) ---
+// They throw on any problem (the editor shows the error) and never log
+// secrets: the only secret, the invite token, is logged once by createInvite.
+
+function runAuthEditorTask(name, fn) {
+  return runWithScriptLock(fn, () => {
+    throw new Error(`${name}: could not acquire the script lock; run it again later.`);
+  }, FIXED_COST_LOCK_WAIT_MS);
+}
+
+function requireAuthUsers() {
+  const users = loadAuthUsers();
+  if (users.error) throw new Error(`${AUTH_USERS_SHEET_NAME} is missing or unreadable: run setupAuthSheets() first.`);
+  return users;
+}
+
+// `user` is a userId or a displayName (exact match). Throws when no user or
+// more than one user matches.
+function resolveAuthUser(users, user) {
+  const key = typeof user === 'string' ? user.trim() : '';
+  if (key === '') throw new Error('User not found: give a userId or a displayName.');
+  if (users.byId[key]) return users.byId[key];
+  const matches = users.list.filter(u => u.displayName === key);
+  if (matches.length === 0) throw new Error(`User not found: ${key}`);
+  if (matches.length > 1) throw new Error(`More than one user is named ${key} (ambiguous): use the userId.`);
+  return matches[0];
+}
+
+function requireSingleAdmin(users) {
+  const admins = users.list.filter(user => user.role === 'admin' && user.status === 'active');
+  if (admins.length !== 1) throw new Error(`Expected exactly one active admin, found ${admins.length}.`);
+  return admins[0];
+}
+
+function ensureAuthSheet(ss, name, headers) {
+  const existing = ss.getSheetByName(name);
+  if (existing && existing.getLastRow() > 0) return false;
+  const sheet = existing || ss.insertSheet(name);
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers.slice()]);
+  return true;
+}
+
+// Logs (never the values) when the secrets needed by auth actions are not
+// usable: AUTH_PROXY_SECRET / PROXY_SECRET unset, or both set to the same value.
+function warnAboutAuthProxySecret() {
+  const props = PropertiesService.getScriptProperties();
+  const proxySecret = props.getProperty('PROXY_SECRET');
+  const authSecret = props.getProperty('AUTH_PROXY_SECRET');
+  if (!proxySecret) console.warn('PROXY_SECRET is not set: auth actions and actor requests are refused.');
+  if (!authSecret) {
+    console.warn('AUTH_PROXY_SECRET is not set: auth actions and actor requests are refused until it is set (same value as Vercel GAS_AUTH_PROXY_SECRET).');
+  } else if (proxySecret && constantTimeEquals(authSecret, proxySecret)) {
+    console.warn('AUTH_PROXY_SECRET has the same value as PROXY_SECRET: use a different random value for each.');
+  }
+}
+
+// Creates the Auth_* sheets that are missing and, when Auth_Users has no
+// admin row at all, the admin user (sources main,yahoo; epoch 0). Idempotent.
+function setupAuthSheets() {
+  return runAuthEditorTask('setupAuthSheets', () => {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const created = [];
+    if (ensureAuthSheet(ss, AUTH_USERS_SHEET_NAME, AUTH_USERS_HEADERS)) created.push(AUTH_USERS_SHEET_NAME);
+    if (ensureAuthSheet(ss, AUTH_CREDENTIALS_SHEET_NAME, AUTH_CREDENTIALS_HEADERS)) created.push(AUTH_CREDENTIALS_SHEET_NAME);
+    if (ensureAuthSheet(ss, AUTH_INVITES_SHEET_NAME, AUTH_INVITES_HEADERS)) created.push(AUTH_INVITES_SHEET_NAME);
+
+    const users = requireAuthUsers();
+    let adminUserId = null;
+    const hasAdminRow = users.table.rows.some(row => users.table.text(row, 'role') === 'admin');
+    if (!hasAdminRow) {
+      adminUserId = newOpaqueId('u_');
+      const now = new Date().toISOString();
+      users.table.append({
+        userId: adminUserId, displayName: '管理者', role: 'admin', sources: 'main,yahoo',
+        homeSource: 'main', epoch: 0, status: 'active', createdAt: now, updatedAt: now
+      });
+    }
+    if (created.indexOf(AUTH_USERS_SHEET_NAME) !== -1 || adminUserId) clearAuthUsersCache();
+    console.log(`setupAuthSheets: created sheets ${JSON.stringify(created)}${adminUserId ? `, admin user ${adminUserId}` : ', admin user already present'}`);
+    warnAboutAuthProxySecret();
+    return {created: created, adminUserId: adminUserId};
+  });
+}
+
+// addUser('Yuki', ['yuki', 'main'], 'yuki') -> the new userId (role member)
+function addUser(displayName, sources, homeSource) {
+  const name = validateSheetText(displayName);
+  if (name === null) throw new Error(`displayName must be 1-${MAX_NAME_LENGTH} characters and must not start with = + - @.`);
+  const list = (Array.isArray(sources) ? sources : String(sources || '').split(','))
+    .map(s => String(s).trim()).filter(s => s !== '');
+  if (list.length === 0) throw new Error('At least one source is required.');
+  list.forEach(s => { if (!isSourceId(s)) throw new Error(`Unknown source: ${s}`); });
+  const unique = list.filter((s, i) => list.indexOf(s) === i);
+  if (unique.indexOf(homeSource) === -1) throw new Error('homeSource must be one of the sources.');
+  return runAuthEditorTask('addUser', () => {
+    const users = requireAuthUsers();
+    const sameName = users.table.rows.filter(row => users.table.text(row, 'displayName') === name);
+    if (sameName.length > 0) {
+      // Idempotent: the same user again returns the existing userId
+      const existing = sameName.length === 1 ? users.list.filter(u => u.row === sameName[0])[0] : null;
+      const sameSet = (a, b) => a.length === b.length && a.every(s => b.indexOf(s) !== -1);
+      if (existing && existing.role === 'member' && existing.homeSource === homeSource && sameSet(existing.sources, unique)) {
+        console.log(`addUser: ${name} already exists as ${existing.userId} (status ${existing.status}); nothing added`);
+        return existing.userId;
+      }
+      throw new Error(`A user named ${name} already exists with a different role, sources or homeSource.`);
+    }
+    const userId = newOpaqueId('u_');
+    const now = new Date().toISOString();
+    users.table.append({
+      userId: userId, displayName: name, role: 'member', sources: unique.join(','),
+      homeSource: homeSource, epoch: 0, status: 'active', createdAt: now, updatedAt: now
+    });
+    clearAuthUsersCache();
+    console.log(`addUser: ${name} -> ${userId} (${unique.join(',')}, home ${homeSource})`);
+    return userId;
+  });
+}
+
+// Disables a user and bumps the epoch (every session ends). Returns the epoch.
+function disableUser(user) {
+  return runAuthEditorTask('disableUser', () => {
+    const users = requireAuthUsers();
+    const target = resolveAuthUser(users, user);
+    users.table.set(target.row, 'status', 'disabled');
+    const epoch = bumpUserEpoch(users, target);
+    clearAuthUsersCache();
+    console.log(`disableUser: ${target.userId} disabled, epoch ${epoch}`);
+    return epoch;
+  });
+}
+
+// "Log out everywhere" for any user. Returns the new epoch.
+function bumpEpoch(user) {
+  return runAuthEditorTask('bumpEpoch', () => {
+    const users = requireAuthUsers();
+    const target = resolveAuthUser(users, user);
+    const epoch = bumpUserEpoch(users, target);
+    clearAuthUsersCache();
+    console.log(`bumpEpoch: ${target.userId} epoch ${epoch}`);
+    return epoch;
+  });
+}
+
+// The app origin for invite links, from Script Property APP_ORIGIN
+// (https://<host>[:port], or http://localhost[:port] for development).
+function getAppOrigin() {
+  const origin = PropertiesService.getScriptProperties().getProperty('APP_ORIGIN');
+  if (!origin || !/^(https:\/\/[A-Za-z0-9.-]+|http:\/\/localhost)(:\d{1,5})?$/.test(origin)) {
+    throw new Error('Script Property APP_ORIGIN must be set to the app origin, e.g. https://<domain> (no path).');
+  }
+  return origin;
+}
+
+// Creates a one-time invite (purpose 'register' or 'recovery') and writes the
+// link ONLY to the execution log. Valid 24 hours; an admin recovery invite 10
+// minutes. Earlier unused invites of the same user stop working. Returns
+// {inviteId, userId, purpose, expiresAt} (never the token).
+function createInvite(user, purpose) {
+  if (INVITE_PURPOSES.indexOf(purpose) === -1) throw new Error(`purpose must be one of ${INVITE_PURPOSES.join(', ')}.`);
+  const origin = getAppOrigin();
+  return runAuthEditorTask('createInvite', () => {
+    const users = requireAuthUsers();
+    const invites = loadAuthInvites();
+    if (!invites) throw new Error(`${AUTH_INVITES_SHEET_NAME} is missing: run setupAuthSheets() first.`);
+    const target = resolveAuthUser(users, user);
+    if (target.status !== 'active') throw new Error(`User ${target.userId} is not active.`);
+
+    const now = new Date();
+    let invalidated = 0;
+    invites.rows.forEach(row => {
+      if (invites.text(row, 'userId') === target.userId && invites.text(row, 'usedAt') === '') {
+        invites.set(row, 'usedAt', now.toISOString());
+        invalidated++;
+      }
+    });
+    const ttl = purpose === 'recovery' && target.role === 'admin' ? ADMIN_RECOVERY_INVITE_TTL_MS : INVITE_TTL_MS;
+    const expiresAt = new Date(now.getTime() + ttl).toISOString();
+    const token = newRandomToken();
+    const inviteId = newOpaqueId('i_');
+    invites.append({
+      inviteId: inviteId, tokenHash: sha256Hex(token), userId: target.userId, purpose: purpose,
+      expiresAt: expiresAt, createdBy: 'editor', usedAt: ''
+    });
+    console.log(`Invite for ${target.displayName} (${purpose}, expires ${expiresAt}${invalidated ? `, ${invalidated} older invite(s) invalidated` : ''}). Send this link privately: ${origin}/invite#${token}`);
+    return {inviteId: inviteId, userId: target.userId, purpose: purpose, expiresAt: expiresAt};
+  });
+}
+
+// Revokes one active passkey of `user`, chosen by its full credential id or by
+// a unique prefix of at least 8 characters (as listUsers shows), and bumps the
+// user's epoch.
+function revokeCredential(user, credentialIdPrefix) {
+  const prefix = typeof credentialIdPrefix === 'string' ? credentialIdPrefix.trim() : '';
+  if (prefix.length < 8) throw new Error('Give at least 8 characters of the credential id (see listUsers()).');
+  return runAuthEditorTask('revokeCredential', () => {
+    const users = requireAuthUsers();
+    const credentials = loadAuthCredentials();
+    if (!credentials) throw new Error(`${AUTH_CREDENTIALS_SHEET_NAME} is missing: run setupAuthSheets() first.`);
+    const target = resolveAuthUser(users, user);
+    const active = activeCredentialsOf(credentials, target.userId);
+    const exact = active.filter(row => credentialIdOf(credentials, row) === prefix);
+    const matches = exact.length > 0 ? exact : active.filter(row => credentialIdOf(credentials, row).indexOf(prefix) === 0);
+    if (matches.length === 0) throw new Error(`No active passkey of ${target.userId} starts with that id (not found).`);
+    if (matches.length > 1) throw new Error(`More than one passkey starts with that id (ambiguous): give more characters.`);
+    credentials.set(matches[0], 'revokedAt', new Date().toISOString());
+    const epoch = bumpUserEpoch(users, target);
+    clearAuthUsersCache();
+    console.log(`revokeCredential: passkey ${prefix.slice(0, 8)}... of ${target.userId} revoked, epoch ${epoch}`);
+    return epoch;
+  });
+}
+
+// Logs every user and passkey (never public keys). Returns the same data.
+function listUsers() {
+  const users = requireAuthUsers();
+  const credentials = loadAuthCredentials();
+  const result = users.list.map(user => ({
+    userId: user.userId,
+    displayName: user.displayName,
+    role: user.role,
+    sources: user.sources.slice(),
+    homeSource: user.homeSource,
+    epoch: user.epoch,
+    status: user.status,
+    passkeys: credentials ? credentials.rows
+      .filter(row => credentials.text(row, 'userId') === user.userId)
+      .map(row => ({
+        credentialIdPrefix: credentialIdOf(credentials, row).slice(0, 12),
+        label: credentials.text(row, 'label'),
+        createdAt: credentials.text(row, 'createdAt'),
+        lastUsedAt: credentials.text(row, 'lastUsedAt'),
+        revokedAt: credentials.text(row, 'revokedAt')
+      })) : []
+  }));
+  result.forEach(user => {
+    console.log(`${user.displayName} ${user.userId} role=${user.role} sources=${user.sources.join(',')} home=${user.homeSource} epoch=${user.epoch} status=${user.status}`);
+    user.passkeys.forEach(key => {
+      console.log(`  passkey ${key.credentialIdPrefix}... "${key.label}" created=${key.createdAt} lastUsed=${key.lastUsedAt || '-'}${key.revokedAt ? ` REVOKED ${key.revokedAt}` : ''}`);
+    });
+  });
+  return result;
+}
+
+// --- Auth: argument-free wrappers for the editor's Run button (§7.2) ---
+// The editor cannot pass arguments; these cover the planned operations.
+function addYukiUser() {
+  return addUser('Yuki', ['yuki', 'main'], 'yuki');
+}
+
+function createYukiRegisterInvite() {
+  return createInvite('Yuki', 'register');
+}
+
+function createYukiRecoveryInvite() {
+  return createInvite('Yuki', 'recovery');
+}
+
+function createAdminRecoveryInvite() {
+  return createInvite(requireSingleAdmin(requireAuthUsers()).userId, 'recovery');
+}
+
+function bumpAdminEpoch() {
+  return bumpEpoch(requireSingleAdmin(requireAuthUsers()).userId);
 }

@@ -529,6 +529,13 @@ GAS の doPost は HTTP ヘッダを読めず `X-Line-Signature` を検証でき
   doPost で source 検証より前に分岐する(すべて POST。秘密値を URL に載せない)。
 - 共通: `PROXY_SECRET` 必須(未設定なら常に `Unauthorized`。移行期間の素通しを適用しない)。書き込みは Script Lock 内。
   認証系シートの変更時は認証用 Script Cache を無効化。応答に招待トークン・ハッシュを含めない。
+- **認証系は `key` に加えて `authKey` 必須**(G3 レビューで追加): 現行本番の `/api/expenses` プロキシは本文を action の制限なしに
+  転送して `key` を付け直すため、`key` だけでは「ログイン済みの任意のブラウザ」と区別できない(push 1〜push 2 の間に
+  `authGetAdminUser` → `authAddCredential`(actor=管理者を自称、bootstrap)で管理者にパスキーを追加される等)。
+  そこで GAS の Script Property `AUTH_PROXY_SECRET`(`PROXY_SECRET` とは別の値)を、本文の `authKey` と定数時間で照合する。
+  Vercel 側は `GAS_AUTH_PROXY_SECRET` として **新しい `/api/auth/*` と actor を付与する経路だけ**が送る(旧プロキシは決して送らない)。
+  `AUTH_PROXY_SECRET` 未設定、`authKey` の欠落・不一致はすべて `Unauthorized` で、何も読まず書かない。
+  値が `PROXY_SECRET` と同じでも別フィールドとして照合する(`setupAuthSheets()` が同値・未設定を警告)。
 
 | action | 用途 | 呼び出し元 | 主な入力 |
 | --- | --- | --- | --- |
@@ -560,7 +567,10 @@ role は当面 GAS 側だけで使う(`authGetAdminUser` が管理者行を特�
 ### 5.7 データアクションへの `actor` 照合
 
 - プロキシは GET クエリ/POST 本文に `actorUserId` と `actorEpoch` を付与する(クライアント送信分は除去)。
+  actor を付けるときは必ず `authKey`(`GAS_AUTH_PROXY_SECRET`)も付ける(§5.6)。
 - GAS は `PROXY_SECRET` 照合 → source 検証 → `actor` 照合(ユーザー行が `active`、epoch 一致、source ∈ sources)の順で判定。
+  actor のフィールドが1つでもあれば、`authKey` が `AUTH_PROXY_SECRET` と一致しない限り `Unauthorized`(旧プロキシ経由で
+  ブラウザが actor を自称しても信頼しない)。actor 無しの main / yahoo は従来どおり `key` だけで通る。
   ユーザー表は Script Cache(認証系書き込みで無効化)から読み、ヒット時はシートを開かない。
 - 移行フラグ(Script Property `AUTHZ_ENFORCE`):
   - 未設定: `actor` 無しの要求は main / yahoo のみ従来どおり許可(旧 UI 互換)。**`yuki` は常に `actor` 必須**。
@@ -609,9 +619,13 @@ SPECIFICATION §8 は「GAS 変更と UI 変更は同じ push に含めてかま
    移行当日(手順 6〜9)の時間帯を Yuki と決めておく。
 2. **push 1(GAS のみ)**: §11 の G1〜G4 を push → deploy.yml が GAS をデプロイし `?action=version` で確認。
    docs 以外の UI 変更を含めない(deploy.yml は Vercel にも再デプロイするが、UI は旧版のまま。旧 UI + 新 GAS は互換)。
-3. GAS エディタで `setupAuthSheets()`(管理者行作成)、`setupSourceSheets('yuki')`、`addUser('Yuki', ['yuki','main'], 'yuki')` を実行(冪等)。
+3. GAS の Script Property に `AUTH_PROXY_SECRET`(`PROXY_SECRET` とは別の英数字の暗号学的乱数。例 `openssl rand -hex 32`)と
+   `APP_ORIGIN`(`https://<本番ドメイン>`)を設定する(push 1 の後。旧 UI は `authKey` を送らないので影響しない)。
+   GAS エディタで `setupAuthSheets()`(管理者行作成。`AUTH_PROXY_SECRET` の未設定・`PROXY_SECRET` との同値を警告)、
+   `setupSourceSheets('yuki')`、`addYukiUser()`(= `addUser('Yuki', ['yuki','main'], 'yuki')`)を実行(冪等)。
    `listUsers()` で管理者行(main, yahoo)と Yuki 行(yuki, main)があることを確認する。
-4. Vercel に `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN` / `LINE_CHANNEL_SECRET` を設定。
+4. Vercel に `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN` / `LINE_CHANNEL_SECRET` と、GAS の `AUTH_PROXY_SECRET` と同じ値の
+   `GAS_AUTH_PROXY_SECRET` を設定。
 5. **push 2(UI)**: §11 の U1〜U5 を1回で push → GAS は差分なしでスキップ、Vercel デプロイ。
    v1 Cookie は無効になる。ここから**移行期間**: パスワードでログインすると誰でも admin の v2 セッション(現状と同じ権限)。
 6. 管理者が最初のパスキーを登録(パスワード再入力で再認証)→ 2つ目を1つ目で再認証して登録 → ログアウト → パスキーでログインできることを確認。
@@ -666,7 +680,9 @@ SPECIFICATION §8 は「GAS 変更と UI 変更は同じ push に含めてかま
 
 - `isAllowedSource` が `yuki` を受理、`Yuki` 等の表記ゆれを拒否。
 - 権限外 source の GET / POST が 403 で GAS を呼ばないこと(fetch をモック)。
-- クライアント送信の `actorUserId` / `actorEpoch` / `key` が除去され、セッション由来の値で上書きされること。
+- クライアント送信の `actorUserId` / `actorEpoch` / `key` / `authKey` が除去され、セッション由来の値で上書きされること。
+- `/api/expenses` の POST が `WRITE_ACTIONS` の許可リスト外(認証系 `auth*` を含む)を 400 で拒否し GAS を呼ばないこと。
+- `authKey` は actor を付けた要求と `/api/auth/*` からの認証系呼び出しにだけ付き、`unstable_cache` のキー・ログ・応答に出ないこと。
 - `actor*` が `unstable_cache` のキー(`toGasQuery` の結果)に含まれないこと、ログ・応答に秘密が出ないこと。
 - GAS の `SessionRevoked` で 401 + Cookie 削除。
 - `APP_PASSWORD` 未設定時、`amr=pwd` のセッションでの GET(`fresh` なし=Next.js キャッシュ経路を含む)・POST が GAS もキャッシュも読まずに 401。
@@ -700,6 +716,10 @@ SPECIFICATION §8 は「GAS 変更と UI 変更は同じ push に含めてかま
 - 認証系: `PROXY_SECRET` 未設定で全拒否(`authGetAdminUser` を含む)、招待の1回限り(連続2回の消費で2回目失敗)、期限切れ、既存未使用招待の無効化、
   パスキー失効で epoch +1、他人を対象にした操作が Web アクションに存在しないこと、数式インジェクション文字の拒否、
   エディタ関数 `createInvite` が生トークンをシートに保存しないこと。
+- `authKey`(旧プロキシ経由の攻撃): `key` だけの `authGetAdminUser` / `authAddCredential`(bootstrap 含む)/ `authRecordCredentialUse`
+  (カウンタ最大化)/ `authRevokeCredential` と、actor 付きのデータ GET・POST が `Unauthorized` で何も読み書きしないこと。
+  `authKey` 正なら通る、誤り・欠落・`AUTH_PROXY_SECRET` 未設定は拒否、`AUTH_PROXY_SECRET` が `PROXY_SECRET` と同値でも
+  `key` は `authKey` として扱われないこと(setup で警告)、ログに `authKey` が出ないこと。
 - 固定費: yuki の固定費 ID に `_yuki` が付く、ある source のロック失敗でも他 source が処理される。
 - 月次レポート: `LINE_DESTINATION_YUKI` 未設定でもスキップして他 source は送信、宛先キーの対応、main の例外で yahoo が止まらない。
 - LINE 連携: コードの1回限り・期限・source 固定、ハッシュ不一致の拒否、失敗3回で有効コード失効、userId ごと・全体のレート制限、確定前は宛先 Property が変わらないこと、取り消しで候補破棄。
@@ -923,7 +943,7 @@ push の分け方(§7.2): このリリースは SPECIFICATION §8 の「GAS と 
 | # | 内容 | 規模 |
 | --- | --- | --- |
 | U1 | `lib/sources.ts`(テーマ定義を含む)、`lib/theme.ts`(accent ごとのクラス対応表)と各 View の indigo 直書きの置き換え、`isAllowedSource` の yuki 対応、`/yuki` 配下ページ・layout(淡いピンクの背景・themeColor)・`yuki-manifest.json`、BottomNav / Dashboard / ManageView のレジストリ化、`ExpenseDetailModal` / `fetchExpenses` / `useExpenses` の source 必須化。レジストリ一致テスト。(この時点では旧 v1 セッションのまま。yuki は GAS が actor 無しを拒否するので読めない) | M |
-| U2 | セッション v2(`readSession`、`amr` と `APP_PASSWORD` 未設定時の `pwd` 拒否)、401 時・利用者変更時の localStorage 消去、**パスワードログインを `authGetAdminUser` による admin の v2 発行に変更**(定数時間比較、`APP_PASSWORD` 未設定で無効化)、middleware の「公開パス以外は保護」+ source 判定(純粋関数化して表駆動テスト)、プロキシの 403・`actor` 付与・`SessionRevoked` 処理、ログアウトと localStorage 消去、`returnTo` 検証 | L |
+| U2 | セッション v2(`readSession`、`amr` と `APP_PASSWORD` 未設定時の `pwd` 拒否)、401 時・利用者変更時の localStorage 消去、**パスワードログインを `authGetAdminUser` による admin の v2 発行に変更**(定数時間比較、`APP_PASSWORD` 未設定で無効化)、middleware の「公開パス以外は保護」+ source 判定(純粋関数化して表駆動テスト)、プロキシの 403・`actor` 付与・`SessionRevoked` 処理、ログアウトと localStorage 消去、`returnTo` 検証。**`/api/expenses` は POST の action を `WRITE_ACTIONS` の許可リストに限定し、クライアント由来の `actorUserId` / `actorEpoch` / `key` / `authKey` を除去してから、actor を付けるときだけ `authKey`(`GAS_AUTH_PROXY_SECRET`)を付ける。認証系 action は `/api/auth/*` からのみ `authKey` 付きで呼ぶ**(§5.6) | L |
 | U3 | パスキー登録・ログイン・追加(再認証必須、ブートストラップはパスワード再入力)の API と画面(`@simplewebauthn/*` 固定版追加、`/invite`、`/login` 改修、`/settings/passkeys`)、チャレンジ Cookie。ソフトウェア認証器テスト | L |
 | U4 | 本人のパスキー一覧・失効・全端末ログアウト、パスキー追加時の LINE 通知呼び出し | S |
 | U5 | LINE webhook(`/api/line/webhook`、生本文での署名検証、連携コード転送)と Yuki の「LINE 連携」画面(コード発行・表示名の確認と確定) | M |

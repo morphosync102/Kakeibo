@@ -13,6 +13,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const gasSource = fs.readFileSync(join(__dirname, '../gas/コード.js'), 'utf8');
 
 const KEY = 'dummy-proxy-secret-for-tests';
+const AUTH_KEY = 'dummy-auth-proxy-secret-for-tests';
+const BOTH = { PROXY_SECRET: KEY, AUTH_PROXY_SECRET: AUTH_KEY };
 const DATA_HEADER = ['Date', 'Merchant', 'Amount', 'Category', 'MessageId', 'Timestamp', 'Type', 'RowId'];
 const CONFIG_HEADER = ['支払い先', '分類'];
 const FIXED_HEADER = ['Type', 'Name', 'Amount', 'Day', 'Category'];
@@ -70,7 +72,7 @@ function createSheet(name, rows, events) {
   };
 }
 
-function loadGas({ sheets = allSheets(), properties = { PROXY_SECRET: KEY } } = {}) {
+function loadGas({ sheets = allSheets(), properties = BOTH } = {}) {
   const events = [];
   const logs = [];
   const sheetObjects = {};
@@ -122,10 +124,15 @@ function loadGas({ sheets = allSheets(), properties = { PROXY_SECRET: KEY } } = 
   return { gas: sandbox, events, logs, sheets: sheetObjects, store, props, snapshot, cacheFaults };
 }
 
-const post = (gas, payload) => JSON.parse(gas.doPost({ postData: { contents: JSON.stringify({ key: KEY, ...payload }) } }).body);
+// The new proxy (U2) adds authKey whenever it adds an actor; the old proxy
+// only ever adds key. Requests with actor fields get authKey unless the test
+// sets it (or `authKey: undefined`) explicitly.
+const hasActor = (payload) => 'actorUserId' in payload || 'actorEpoch' in payload;
+const withKeys = (payload) => ({ key: KEY, ...(hasActor(payload) ? { authKey: AUTH_KEY } : {}), ...payload });
+const post = (gas, payload) => JSON.parse(gas.doPost({ postData: { contents: JSON.stringify(withKeys(payload)) } }).body);
 // doGet receives every query value as a string
 const get = (gas, parameter = {}) => JSON.parse(gas.doGet({
-  parameter: Object.fromEntries(Object.entries({ key: KEY, ...parameter }).map(([k, v]) => [k, String(v)])),
+  parameter: Object.fromEntries(Object.entries(withKeys(parameter)).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
 }).body);
 const writesTo = (events) => [...new Set(events.filter(e => e.startsWith('write:')).map(e => e.slice(6)))].sort();
 const gens = (store) => ({ main: store.get('kakeibo_main_gen'), yahoo: store.get('kakeibo_yahoo_gen'), yuki: store.get('kakeibo_yuki_gen') });
@@ -307,7 +314,7 @@ test('AUTHZ_ENFORCE unset: requests without actor keep working for main / yahoo 
 });
 
 test('AUTHZ_ENFORCE=1: every data request needs an actor; with one the matrix applies as before', () => {
-  const { gas, snapshot } = loadGas({ properties: { PROXY_SECRET: KEY, AUTHZ_ENFORCE: '1' } });
+  const { gas, snapshot } = loadGas({ properties: { ...BOTH, AUTHZ_ENFORCE: '1' } });
   const before = snapshot();
   for (const source of [undefined, 'main', 'yahoo', 'yuki']) {
     const params = source ? { source } : {};
@@ -323,7 +330,7 @@ test('AUTHZ_ENFORCE=1: every data request needs an actor; with one the matrix ap
 
 test('AUTHZ_ENFORCE values other than "1" keep the migration behaviour', () => {
   for (const value of ['', '0', 'true', 'yes']) {
-    const { gas } = loadGas({ properties: { PROXY_SECRET: KEY, AUTHZ_ENFORCE: value } });
+    const { gas } = loadGas({ properties: { ...BOTH, AUTHZ_ENFORCE: value } });
     assert.equal(get(gas).length, 1, `AUTHZ_ENFORCE=${JSON.stringify(value)}`);
   }
 });
@@ -339,6 +346,45 @@ test('an actor is trusted only after the PROXY_SECRET check: unset secret + acto
   // Old UI (no actor) still works during the migration period; yuki never does
   assert.equal(get(gas).length, 1);
   assert.deepEqual(get(gas, { source: 'yuki' }), { error: 'Forbidden' });
+});
+
+test('an actor is trusted only with authKey (the old proxy forwards bodies but only ever adds key)', () => {
+  const { gas, snapshot, events, logs } = loadGas();
+  const before = snapshot();
+  const keyOnly = { authKey: undefined };
+  for (const authKey of [undefined, '', 'wrong', KEY, AUTH_KEY + 'x', 123]) {
+    const label = `authKey ${JSON.stringify(authKey)}`;
+    assert.deepEqual(get(gas, { source: 'yuki', ...YUKI, ...keyOnly, ...(authKey === undefined ? {} : { authKey }) }), { error: 'Unauthorized' }, `GET ${label}`);
+    assert.deepEqual(get(gas, { source: 'main', ...ADMIN, ...keyOnly, ...(authKey === undefined ? {} : { authKey }) }), { error: 'Unauthorized' }, `GET main ${label}`);
+    assert.deepEqual(post(gas, { ...writeActions('yuki')[0], ...YUKI, authKey }), { error: 'Unauthorized' }, `POST ${label}`);
+    assert.deepEqual(post(gas, { action: 'updateCategory', source: 'main', merchant: 'Shared shop', category: 'x', ...YUKI, authKey }), { error: 'Unauthorized' }, `updateCategory ${label}`);
+  }
+  // A single actor field is enough to require authKey
+  assert.deepEqual(post(gas, { ...writeActions('main')[0], actorUserId: 'u_dummyAdmin', authKey: undefined }), { error: 'Unauthorized' });
+  assert.equal(snapshot(), before, 'nothing written');
+  assert.ok(!events.some(e => e.startsWith('read:')), 'nothing read');
+  assert.ok(!logs.some(l => l.includes(AUTH_KEY) || l.includes(KEY)), 'keys never logged');
+  // With the right authKey the actor is checked as usual
+  assert.ok(Array.isArray(get(gas, { source: 'yuki', ...YUKI })));
+});
+
+test('without AUTH_PROXY_SECRET every actor request is Unauthorized; requests without actor are unaffected', () => {
+  const { gas, snapshot } = loadGas({ properties: { PROXY_SECRET: KEY } });
+  const before = snapshot();
+  assert.deepEqual(get(gas, { source: 'yuki', ...YUKI }), { error: 'Unauthorized' });
+  assert.deepEqual(post(gas, { ...writeActions('main')[0], ...ADMIN }), { error: 'Unauthorized' });
+  assert.equal(snapshot(), before);
+  assert.equal(get(gas).length, 1);
+  assert.equal(post(gas, writeActions('yahoo')[0]).success, true);
+});
+
+test('authKey is a separate field even when AUTH_PROXY_SECRET has the same value as PROXY_SECRET', () => {
+  const { gas, snapshot } = loadGas({ properties: { PROXY_SECRET: KEY, AUTH_PROXY_SECRET: KEY } });
+  const before = snapshot();
+  // The old proxy sends key=<PROXY_SECRET> only: never accepted as authKey
+  assert.deepEqual(post(gas, { ...writeActions('yuki')[0], ...YUKI, authKey: undefined }), { error: 'Unauthorized' });
+  assert.equal(snapshot(), before);
+  assert.ok(Array.isArray(get(gas, { source: 'yuki', ...YUKI, authKey: KEY })));
 });
 
 test('a forged actor with a wrong key is Unauthorized before anything else', () => {
@@ -490,7 +536,7 @@ test('clearAuthUsersCache never throws when the cache service fails', () => {
 });
 
 test('time-driven functions are not affected by AUTHZ_ENFORCE or the user table', () => {
-  const { gas, events } = loadGas({ sheets: allSheets({ users: null }), properties: { PROXY_SECRET: KEY, AUTHZ_ENFORCE: '1' } });
+  const { gas, events } = loadGas({ sheets: allSheets({ users: null }), properties: { ...BOTH, AUTHZ_ENFORCE: '1' } });
   assert.doesNotThrow(() => gas.processFixedCosts());
   assert.ok(!events.includes('read:Auth_Users'));
 });

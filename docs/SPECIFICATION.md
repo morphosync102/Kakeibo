@@ -192,6 +192,19 @@ H列はUUID形式(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)の値だけをRowIdと
 | D | Day | 毎月の登録日 |
 | E | Category | カテゴリ |
 
+### 認証シート(Auth_Users / Auth_Credentials / Auth_Invites)
+
+GASエディタの`setupAuthSheets()`が作成します(§4「認証API」の運用手順)。列は見出し名で特定するため順序は問いません。
+どのシートも、セルの値が`=` `+` `-` `@`で始まらないようにします(表示名・ラベルは入力時に拒否、生成値はその文字で始まらない)。
+
+| シート | 列 | 内容 |
+| --- | --- | --- |
+| `Auth_Users` | userId, displayName, role, sources, homeSource, epoch, status, createdAt, updatedAt | userIdは`u_`+128ビット乱数(base64url)。roleは`admin`/`member`。sourcesはカンマ区切り。epochは0以上の整数。statusは`active`/`disabled` |
+| `Auth_Credentials` | credentialId, userId, publicKey, counter, transports, deviceType, backedUp, label, createdAt, lastUsedAt, revokedAt | credentialId・publicKey(COSE公開鍵)はbase64urlに接頭辞`b64u:`を付けて保存(`-`始まりの値を数式扱いさせないため)。counterは数値。transportsはカンマ区切り。revokedAtが空でなければ失効(行は削除しない) |
+| `Auth_Invites` | inviteId, tokenHash, userId, purpose, expiresAt, createdBy, usedAt | tokenHashは招待トークンのSHA-256(小文字16進64桁)。トークン自体は保存しない。purposeは`register`/`recovery`。usedAtが空でなければ使用済みまたは無効化済み |
+
+日時はISO 8601文字列で書き込みます(シートが日時型に変換しても読めます)。
+
 ## 4. API契約
 
 ブラウザは直接GASへアクセスせず、Next.jsの`/api/expenses`を経由します。
@@ -225,15 +238,17 @@ GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシと
 設計書`docs/design/2026-11-yuki-and-passkeys.md` §5.7。プロキシはセッションから得た利用者を
 GETクエリ/POST本文の`actorUserId`(文字列)と`actorEpoch`(0以上の整数。クエリでは数字列)としてGASへ渡します
 (クライアント送信分は除去。プロキシ側はU2で実装予定。現行UI・現行プロキシは送りません)。
+actorを付けるときは、`key`とは別の秘密`authKey`(Vercel`GAS_AUTH_PROXY_SECRET` = GAS`AUTH_PROXY_SECRET`)も付けます。
+現行の`/api/expenses`は本文をそのまま転送して`key`を付け直すため、`key`だけではブラウザが自称したactorと区別できないからです。
 
 GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定し、失敗時は何も読み書きしません。
 
 | 状況 | 応答 |
 | --- | --- |
+| actorのフィールド(`actorUserId`/`actorEpoch`)が1つでもあり、`authKey`が`AUTH_PROXY_SECRET`と一致しない(欠落・誤り・`AUTH_PROXY_SECRET`または`PROXY_SECRET`未設定を含む) | `{ "error": "Unauthorized" }` |
 | `actorUserId`/`actorEpoch`の片方だけ、形式不正(IDは英数字`_-`の1〜64文字) | `{ "error": "Invalid actor" }` |
 | actor無し、かつ source が`yuki`(レジストリの`requiresActor`)またはScript Property`AUTHZ_ENFORCE`が`1` | `{ "error": "Forbidden" }` |
 | actor無し、`main`/`yahoo`、`AUTHZ_ENFORCE`未設定(`1`以外) | 従来どおり許可(旧UI互換) |
-| actor付きだが`PROXY_SECRET`未設定(actorを信頼できない) | `{ "error": "Unauthorized" }` |
 | `Auth_Users`シートが無い・必須列(userId/sources/epoch/status)が無い・読めない | `{ "error": "AuthUnavailable" }`(fail closed) |
 | 利用者が存在しない、`status`が`active`以外、`epoch`不一致 | `{ "error": "SessionRevoked" }` |
 | sourceが利用者の`sources`に無い | `{ "error": "Forbidden" }` |
@@ -252,6 +267,78 @@ GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定
 - 手作業で編集した場合はGASエディタから`clearAuthUsersCache()`を実行します(実行しなくても最大10分で反映)。
 - 時間トリガー・エディタ関数はactor照合の対象外です。
 - `AUTHZ_ENFORCE=1`は全利用者がactor付きのUIへ移行した後に設定します(再デプロイ不要、削除で即時に戻せる)。
+
+### 認証API(GAS 認証系アクション)
+
+設計書§3・§5.6。GASはWebAuthnの署名を検証しません。Next.jsサーバーが`@simplewebauthn/server`で検証した結果だけを受け取り、
+保存・照合(招待の1回性、チャレンジの1回性、epoch)を行います。すべてPOSTで、本文に`key`が必要です。
+
+- 認証系アクションは`key`(`PROXY_SECRET`)に加えて本文の`authKey`が`AUTH_PROXY_SECRET`と一致する必要があります(定数時間比較)。
+  `PROXY_SECRET`・`AUTH_PROXY_SECRET`のどちらかが未設定、または`authKey`の欠落・誤りは`{ "error": "Unauthorized" }`で、
+  何も読み書きしません(移行期間の素通しを適用しない)。`authKey`は新しい`/api/auth/*`だけが送り、`/api/expenses`経由では
+  届きません(U2で`/api/expenses`のPOSTを`WRITE_ACTIONS`の許可リストに限定し、クライアント由来の`authKey`等を除去)。
+  2つの値が同じでも`key`は`authKey`として扱いません(`setupAuthSheets()`が同値・未設定を警告)。値はログに出しません。
+- `source`は見ません(データ用のsource検証・actor照合より前に分岐)。
+- 書き込みはScript Lock内で状態を読み直してから行い、取得できなければ`{ "error": "Busy" }`です。`Auth_Users`を書き換えたら
+  ロック内で`clearAuthUsersCache()`を呼びます(データ側のactor照合に即時反映)。
+- 想定外の例外は`{ "error": "AuthError" }`だけを返します(内容はログのみ)。応答・ログに招待トークン・トークンハッシュを含めません。
+- 入力形式: `tokenHash`・`challengeHash`は小文字16進64桁(SHA-256)。`credentialId`・`publicKey`はbase64url。
+  不正なら何も読み書きせず`{ "error": "Invalid input" }`。actorは`actorUserId`/`actorEpoch`(§「利用者の照合」と同じ形式、欠落・不正は`Invalid actor`)。
+- `credential`(検証済みの登録結果): `{ credentialId, publicKey, counter(0〜2^32-1の整数), transports?: ("usb"|"nfc"|"ble"|"internal"|"hybrid"|"cable"|"smart-card")[], deviceType?: "singleDevice"|"multiDevice", backedUp?: boolean, label?: string(1〜40文字、= + - @ で始まらない。省略時「パスキー」) }`。
+
+| action | 用途 | 入力 | 成功時 | 主なエラー |
+| --- | --- | --- | --- | --- |
+| `authGetAdminUser` | パスワードログイン(移行期間)で管理者行を得る | なし | `{ success, user: { userId, displayName, role: "admin", sources, homeSource, epoch } }` | `AdminNotFound`(active な admin が0件)、`AdminAmbiguous`(2件以上)、`AuthUnavailable` |
+| `authPeekInvite` | 招待の有効性確認(消費しない) | tokenHash | `{ success, purpose, user: { userId, displayName }, credentials: [{ credentialId, transports }] }`(excludeCredentials用) | `InviteInvalid`(存在しない・使用済み・無効化済み・期限切れ・利用者が active でない) |
+| `authConsumeInviteAndAddCredential` | 招待の消費とパスキー追加(原子的) | tokenHash, challengeHash, credential | `{ success, user: { userId, displayName, sources, homeSource, epoch } }` | `InviteInvalid`、`CredentialExists`、`ChallengeReused` |
+| `authAddCredential` | 再認証済みの本人がパスキーを追加 | actor, challengeHash, credential, bootstrap? | `{ success, credentialCount }` | `SessionRevoked`、`NoExistingCredential`(パスキー0件なのに bootstrap なし)、`BootstrapNotAllowed`(bootstrap は role=admin かつ有効なパスキー0件のときだけ)、`CredentialExists`、`ChallengeReused` |
+| `authGetCredential` | ログイン検証用の公開鍵取得 | credentialId | `{ success, credential: { credentialId, userId, publicKey, counter, transports }, user: { userId, displayName, sources, homeSource, epoch } }` | `CredentialNotFound`(存在しない・失効済み・利用者が active でない) |
+| `authRecordCredentialUse` | 認証成功の記録 | credentialId, counter, challengeHash | `{ success }`(lastUsedAt更新、counterは増えたときだけ更新) | `ChallengeReused`、`CredentialNotFound` |
+| `authListCredentials` | 本人の有効なパスキー一覧(公開鍵なし) | actor | `{ success, credentials: [{ credentialId, label, deviceType, backedUp, createdAt, lastUsedAt }] }` | `SessionRevoked` |
+| `authRevokeCredential` | 本人のパスキー失効 + epoch+1 | actor, credentialId | `{ success, epoch }` | `SessionRevoked`、`CredentialNotFound`(他人のもの・失効済みを含む) |
+| `authBumpEpoch` | 本人の全端末ログアウト(epoch+1) | actor | `{ success, epoch }` | `SessionRevoked` |
+
+共通エラー: `Unauthorized`、`Invalid input`、`Invalid actor`、`AuthUnavailable`(認証シートが無い・列が無い)、`Busy`、`AuthError`。
+
+- 招待: 有効期限は24時間(管理者の`recovery`招待は10分)。1回限りで、消費はロック内で未使用・期限・利用者を再確認します。
+  同じ利用者に新しい招待を発行すると、その利用者の未使用の招待はすべて無効になります。
+- チャレンジの再利用防止: 状態の確認を通った要求だけが、ロック内で`challengeHash`をScript Cache(`kakeibo_auth_challenge_<hash>`、5分)に記録します。
+  記録済みなら`ChallengeReused`で何も書き込みません(招待も消費しない)。Script Cacheが使えない場合は記録せず続行し(ログ)、
+  Next.js側の署名付き5分チャレンジCookieが残りの防御です。
+- 他人に対する操作(招待発行、利用者の追加・無効化、他人のパスキー失効・epoch更新)はWebアクションに存在せず、エディタ関数だけで行います。
+
+#### 認証の運用(GASエディタ関数)
+
+エディタの実行ボタンは引数を渡せないため、計画済みの操作には引数なしの関数を用意しています。
+
+| 関数 | 用途 |
+| --- | --- |
+| `setupAuthSheets()` | 認証シートの作成と管理者行(role=admin、sources=main,yahoo、epoch 0)の作成。冪等(admin行が既にあれば作らない)。`AUTH_PROXY_SECRET`の未設定・`PROXY_SECRET`との同値を警告 |
+| `addYukiUser()` = `addUser('Yuki', ['yuki','main'], 'yuki')` | 利用者の追加(role=member)。同じ表示名・role・sources(順不同)・homeSourceの利用者が既にあればそのuserIdを返す(冪等)。表示名が同じで属性が違う場合、未知のsource、homeSourceがsources外はエラー |
+| `createYukiRegisterInvite()` / `createYukiRecoveryInvite()` / `createAdminRecoveryInvite()` = `createInvite(user, purpose)` | 招待の発行。URL `<APP_ORIGIN>/invite#<token>` は**実行ログにのみ**出力。戻り値・シートにトークンは残らない |
+| `bumpAdminEpoch()` = `bumpEpoch(user)` | 全端末ログアウト(epoch+1) |
+| `disableUser(user)` | 利用者の無効化(epoch+1) |
+| `revokeCredential(user, credentialIdPrefix)` | パスキーの失効(完全なIDまたは8文字以上の一意な前方一致)+ epoch+1 |
+| `listUsers()` | 利用者とパスキー(IDの先頭12文字、ラベル、日時)を実行ログへ。公開鍵は出さない |
+| `clearAuthUsersCache()` | `Auth_Users`を手作業で編集した後に実行 |
+
+`user`はuserIdまたは表示名(完全一致。同名が複数あればエラー)。引数が必要な関数を一時的に実行する場合は、
+エディタ上で呼び出し用の関数を一時的に追加して実行し、終わったら削除します(リポジトリの`gas/コード.js`が正本のため次のデプロイで消えます)。
+招待URLにはScript Property`APP_ORIGIN`(`https://<本番ドメイン>`、パスなし。開発時は`http://localhost:3000`)が必要です。
+
+初回の手順(GASデプロイ後):
+
+1. Script Propertyに`AUTH_PROXY_SECRET`(`PROXY_SECRET`とは別の英数字の暗号学的乱数。例`openssl rand -hex 32`)と`APP_ORIGIN`を設定する。
+   旧UIは`authKey`を送らないため、設定しても既存の動作は変わりません。Vercelには同じ値を`GAS_AUTH_PROXY_SECRET`として設定する(U2)。
+2. `setupAuthSheets()` → `setupSourceSheets()` → `addYukiUser()` → `listUsers()`で内容を確認する。実行ログに警告が無いことも確認する。
+3. 最初に`createInvite`系を実行した後、`Auth_Invites`の`expiresAt`セルを一度開き、値の型(文字列のままか、シートが日時型に変換したか)と
+   表示されている日時が「発行時刻 + 24時間(管理者の`recovery`は10分)」になっていることを確認する。続けて`authPeekInvite`相当の動作
+   (UIの`/invite`を開く等)で期限内は有効と判定されることを確認する。日時型に変換されていても判定は動作する設計ですが、
+   スプレッドシートのタイムゾーン設定による表示のずれが無いかをここで確認します。
+
+乱数: Apps Scriptの`Utilities.getUuid()`は暗号学的乱数であることが公式に明記されていないため、UUID 4つ・時刻・`Math.random()`を連結して
+SHA-256を通した32バイトを使います(入力のうち最も予測困難なものと同等以上の予測困難性)。招待トークンは256ビット(base64url 43文字)、
+userId・inviteIdは128ビットです。
 
 ### GET
 
@@ -414,12 +501,15 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 ### GAS Script Properties
 
 - `SHEET_ID`
+- `APP_ORIGIN`: 招待URLの生成に使うアプリのオリジン(`https://<本番ドメイン>`、パスなし)。`createInvite`系の実行に必須。秘密値ではない
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
 - `LINE_DESTINATION_YUKI`: Yuki の月次レポート宛先(LINE userId)。任意。未設定の間は yuki の月次レポートを送らない
   (値の設定方法は設計書 §5.4 の LINE 連携。G4 で実装予定)
 - `AUTHZ_ENFORCE`: `1`で全データ要求にactorを必須にする(未設定・`1`以外は移行期間: actor無しのmain/yahooを許可)。秘密値ではない
+- `AUTH_PROXY_SECRET`: 認証系アクションとactor付き要求の`authKey`を照合する共有シークレット。`PROXY_SECRET`とは別の値にし、
+  Vercelの`GAS_AUTH_PROXY_SECRET`と同じ値にする。未設定の間は認証系アクションとactor付き要求がすべて`Unauthorized`
 - `PROXY_SECRET`: プロキシ認証の共有シークレット(Vercelの`GAS_PROXY_SECRET`と同じ値。未設定時は認証なし=移行期間)
 
 実値はリポジトリ、テスト、ドキュメントへ保存しません。
