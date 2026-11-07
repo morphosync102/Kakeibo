@@ -131,11 +131,18 @@ GAS・API層と画面層を分けてコード調査した結果。優先度は�
 
 ### P0 — セキュリティ・データ整合性
 
-#### 4-1. GAS Web App に認証がない
+#### 4-1. GAS Web App に認証がない ✅ 対応済み (2026-11-07、移行期間の素通し削除は未対応)
 - 対象: `gas/コード.js` の `doGet` / `doPost`、`app/api/expenses/route.ts`。
 - 症状: GAS の URL を知っていれば、Vercel のログインを経由せず全明細の取得・削除・カテゴリ一括変更ができる。
 - 方針: Script Properties に共有シークレットを置き、プロキシが本文/クエリで送り、GAS 入口で照合する。
   移行は「未設定なら素通し」でGASデプロイ → Vercel に設定 → 照合必須化。
+- 対応 (2026-11-07): GAS は Script Property `PROXY_SECRET` が設定されていれば doGet(クエリ `key`)/doPost(本文 `key`)を
+  SHA-256 ダイジェストの定数時間比較で照合し、不一致・欠落は `{error:'Unauthorized'}`(LINE webhook は対象外、読み書き不可)。
+  プロキシは `GAS_PROXY_SECRET` があれば `key` を付与し、クライアントの `key` は除去、キャッシュキー・ログ・応答に含めない。
+  手順は SPECIFICATION「プロキシ認証(GAS)」。
+- **未対応(後続タスク)**: 移行完了後、GAS の「`PROXY_SECRET` 未設定なら通す」処理を削除し未設定時は拒否にする
+  (あわせてプロキシも `GAS_PROXY_SECRET` 未設定時はエラーにするか検討)。
+  将来的には一覧取得も doPost のアクションにして、秘密値を URL(GET クエリ)から完全に外す。
 - GASデプロイ: **必要**(Vercel 環境変数も)。
 
 #### 4-2. 明細一覧のキャッシュが 100KB 上限で失敗すると doGet 全体が落ちる(潜在) ✅ 対応済み (2026-11-07)

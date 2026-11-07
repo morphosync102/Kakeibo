@@ -159,6 +159,29 @@ MessageIdは常に一意とは限りません。同じメールから複数明�
 ブラウザは直接GASへアクセスせず、Next.jsの`/api/expenses`を経由します。
 Next.jsは`GAS_API_URL`へリクエストを転送します。
 
+### プロキシ認証(GAS)
+
+GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシとGASで共有シークレットを照合します。
+
+- プロキシ: Vercel環境変数`GAS_PROXY_SECRET`があれば、GETはGASへのクエリ、POSTは本文に`key`として付与します。
+  クライアントが送った`key`は常に削除・上書きし、レスポンス・ログ・`unstable_cache`のキャッシュキーには含めません
+  (キーは送信直前にのみ付与)。未設定なら付与しません(移行期間)。
+- GAS: Script Property`PROXY_SECRET`が設定されていれば、doGetはクエリ`key`、doPostは本文`key`を
+  SHA-256ダイジェストの全バイト比較(定数時間)で照合し、不一致・欠落は`{ "error": "Unauthorized" }`を返します
+  (sourceの検証より前)。未設定なら警告ログを出して通します(移行期間)。
+- GASの`Unauthorized`は、プロキシのGETでは配列以外として502、POSTでは`{ error }`のままUIへ返り失敗として扱われます。
+- LINE webhook形式のPOSTはLINEから直接届くため照合対象外ですが、成功応答で無視するだけで明細の読み書きはしません。
+  時間トリガー(関数の直接実行)は影響を受けません。
+
+移行手順:
+
+1. GASをデプロイする(`PROXY_SECRET`未設定のため従来どおり動作)。
+2. Vercelの**Production**環境に`GAS_PROXY_SECRET`を設定し、UI/プロキシを再デプロイする(GASは未設定のため`key`を無視)。
+   値は英数字のみの暗号学的乱数にする(例: `openssl rand -hex 32`)。
+3. GASのScript Property`PROXY_SECRET`に同じ値を設定して照合を有効化する(GASの再デプロイ不要、次のリクエストから有効)。
+   直後に一覧表示と書き込みの両方を確認し、`Unauthorized`になる場合はPropertyを削除すれば即座に元へ戻せる。
+4. 動作確認後、GASの「未設定なら通す」処理を削除し、未設定時は拒否にする(後続タスク、IMPROVEMENTS 4-1)。
+
 ### GET
 
 - `GET /api/expenses`: 対象sourceの明細一覧
@@ -275,6 +298,7 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `APP_PASSWORD`
 - `SESSION_SECRET`: 暗号学的乱数32バイトを64文字の16進数で設定する、サーバー専用の署名鍵。パスワードから生成せず、ソース・ログには保存しません。本番デプロイ前に設定が必要です。ローカル開発でも独立した鍵を環境変数に設定します。
 - `GAS_API_URL`
+- `GAS_PROXY_SECRET`: GASとの共有シークレット(プロキシ認証)。GASの`PROXY_SECRET`と同じ値。
 
 ### GAS Script Properties
 
@@ -282,6 +306,7 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
+- `PROXY_SECRET`: プロキシ認証の共有シークレット(Vercelの`GAS_PROXY_SECRET`と同じ値。未設定時は認証なし=移行期間)
 
 実値はリポジトリ、テスト、ドキュメントへ保存しません。
 

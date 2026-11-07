@@ -140,6 +140,7 @@ Script Properties required:
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
+- `PROXY_SECRET` (optional during migration: shared secret checked as `key`; must equal Vercel `GAS_PROXY_SECRET`)
 
 Never store these values in the repository, project skills, tests, or documentation:
 
