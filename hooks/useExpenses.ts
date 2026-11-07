@@ -2,16 +2,10 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchExpenses, Expense } from '@/lib/api';
+import { isSameExpense } from '@/lib/expense-identity';
 import { fetchDiscardAction, getPendingWrites, getSettledWrites, shouldApplyFetch, subscribePendingWrites } from '@/lib/write-queue';
 
 const STORAGE_KEY = 'kakeibo_expenses_cache';
-
-function isSameExpense(a: Expense, b: Expense) {
-    return a.id === b.id
-        && a.date === b.date
-        && a.merchant === b.merchant
-        && a.amount === b.amount;
-}
 
 export function useExpenses(source?: string) {
     const [expenses, setExpensesState] = useState<Expense[]>([]);

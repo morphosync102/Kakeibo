@@ -36,11 +36,12 @@
 
 | ファイル | 責務 |
 | --- | --- |
-| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新(未完了の書き込み中・取得開始後の変更があった取得結果は破棄し、書き込み完了後に再取得)、`error` で失敗通知(失敗時もキャッシュ維持) |
+| `hooks/useExpenses.ts` | 明細取得フック。localStorage キャッシュ(source別キー)を即表示 → バックグラウンドで再取得。`refresh()` で明示更新、`removeLocal()` / `updateLocal()` で楽観的更新(対象行は `isSameExpense` で特定。未完了の書き込み中・取得開始後の変更があった取得結果は破棄し、書き込み完了後に再取得)、`error` で失敗通知(失敗時もキャッシュ維持) |
 | `lib/api.ts` | `Expense` 型と `fetchExpenses(source, { fresh })`(`/api/expenses` を叩き日付降順ソート。`fresh` でサーバーキャッシュ迂回。エラー時は throw) |
 | `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `lib/expense-analysis.ts` | 純粋関数：日付の厳密な正規化、期間集計・ゼロ補完・累積値、支出検索条件の検証・AND絞り込み・合計、カテゴリ候補 |
 | `middleware.ts` | セッションの署名・期限による画面・API保護。無効な場合、APIは401、画面は`/login?returnTo=`へ |
+| `lib/expense-identity.ts` | `isSameExpense()`: 両方に `rowId` があれば rowId 比較、なければ MessageId+日付+店舗+金額の従来比較(旧 localStorage キャッシュ互換) |
 | `lib/expenses-proxy.ts` | プロキシ用の純粋関数: `isAllowedSource()`(省略/main/yahoo)、`parseGasList()`(配列以外は例外) |
 | `lib/session.ts` | サーバー用Web Crypto HMAC-SHA256によるセッション発行・署名／期限／形式検証。乱数nonceと環境変数`SESSION_SECRET`を使用 |
 | `lib/write-queue.ts` | クライアント書き込みの直列化。`postWrite()` が `/api/expenses` への POST(`keepalive`、45秒タイムアウト。時間切れは失敗確定ではない `WriteTimeoutError`)を1本の Promise チェーンで順に送る(失敗・時間切れでも次を送る)。未完了数の購読/取得と完了数、取得結果を適用してよいかの判定 `shouldApplyFetch()`、破棄後の動作 `fetchDiscardAction()` |
@@ -84,10 +85,11 @@ useExpenses (localStorage, source別)   ← 即表示 + マウント時バック
 | --- | --- |
 | エントリ | `doGet`(既定: 明細一覧 / `getFixedCosts`)、`doPost`(action分岐)、`responseJSON` |
 | キャッシュ | `getCacheKey`、`clearCache(source)`、`getExpensesWithCache`、`getFixedCostsWithCache` |
-| 書き込みaction | `addTransaction` / `deleteTransaction`(date/merchant/amount指定で厳密照合、idのみは旧互換の先頭一致)/ `updateTransactionDate`(厳密照合)/ `updateTransaction`(厳密照合で金額・店舗名・カテゴリ更新)/ `updateCategory` / `addFixedCost` / `deleteFixedCost` |
+| 書き込みaction | `addTransaction`(RowId採番)/ `deleteTransaction`(date/merchant/amount指定で厳密照合、idのみは旧互換の先頭一致、rowId があれば優先)/ `updateTransactionDate`(厳密照合、rowId 優先)/ `updateTransaction`(厳密照合で金額・店舗名・カテゴリ更新、rowId 優先)/ `updateCategory` / `addFixedCost` / `deleteFixedCost` |
 | メール取込 | `runEmailExtraction` → `extractRakutenEmails` / `extractOliveEmails` / `extractJcbEmails` + 各 `parse*Body`、`determineCategory`、`getExistingMessageIds` |
 | 固定費 | `processFixedCosts`(日次トリガー)→ `processFixedCostsForSource` |
 | 月次LINEレポート | `sendMonthlyKakeiboReports`(毎月10日トリガー)→ `sendMonthlyKakeiboReportForSource`、`buildMonthlyKakeiboReportText`、`pushLineTextMessage`、`testSend*` 各種 |
+| RowId(H列) | `newRowId`、`ensureRowIdColumn`、`readRowIdParam`、`findTransactionRowIndex`(rowId+内容一致、未採番行へのフォールバック)、`backfillRowIds`(既存行の採番、手動1回実行・冪等) |
 | その他 | `getTargetSheets(source)`(main/yahoo分離の要)、`isLineWebhookPayload`(webhook無視) |
 
 ## カテゴリ定数の所在

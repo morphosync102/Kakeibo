@@ -133,9 +133,31 @@ Spreadsheet IDはGAS Script Property `SHEET_ID`から取得します。
 | E | MessageId | メールID、固定費ID、手動入力ID |
 | F | Timestamp | 登録日時 |
 | G | Type | `Income`または`Expense`。空やその他は支出扱い |
+| H | RowId | 行ごとに一意なID(UUID形式の値)。追加時に採番。既存行は`backfillRowIds()`で採番 |
 
 MessageIdは常に一意とは限りません。同じメールから複数明細を抽出した場合、
-複数行が同じMessageIdを共有します。
+複数行が同じMessageIdを共有します。MessageIdはメール取込の重複判定に使うため残し、
+行の識別にはRowIdを使います。
+
+RowIdは列番号に依存する既存処理(G列の種別、月次レポート等)を壊さないよう末尾(H列)に置き、
+数式ではなく値で書き込みます。明細を追加する全経路(`addTransaction`、固定費の自動登録、
+楽天/Olive/JCBのメール取込)で`Utilities.getUuid()`により採番します(いずれも新規行のH列にのみ書き込み)。
+
+H列はUUID形式(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)の値だけをRowIdとして扱います。手入力のメモ等が
+入っている行はRowId未採番として扱い(一覧の`rowId`にも含めない)、従来の厳密照合で更新・削除できます。
+
+#### RowIdの導入手順
+
+1. GASをデプロイする(新規行からRowIdが付く。既存行はRowId無しのまま従来の照合で動作)。
+2. GASエディタから`backfillRowIds()`を1回実行する(Script Lock内でData/Yahoo_Dataを別々に処理し、
+   H列が空の行だけ採番、H1が空ならヘッダ`RowId`を書き込み、各sourceのキャッシュを無効化。
+   冪等なので再実行しても既存値は変わりません)。
+   H列が既に別用途で使われている場合(H1が空でも`RowId`でもない、またはH2以降にUUID以外の値がある)は、
+   両シートとも何も書き込まずにエラーで中止します(メッセージはシート名と件数のみ)。
+   H列の内容を別の列へ移してから再実行してください。
+3. UIをデプロイする(UIはbackfill前でも、旧GASでも動作します)。
+
+シートへ手作業で行を追加した場合は、`backfillRowIds()`を再実行してRowIdを採番します。
 
 ### Config / Yahoo_Config
 
@@ -206,9 +228,9 @@ APIルートの`maxDuration`は60秒です(クライアントの書き込みタ�
 | action | 更新範囲 | 主な入力 |
 | --- | --- | --- |
 | `addTransaction` | 対象sourceへ明細1件追加 | date, merchant, amount, category, type |
-| `deleteTransaction` | 対象sourceの明細1件削除。date/merchant/amountを渡すと厳密照合、id のみなら旧来の先頭一致 | id, [date, merchant, amount] |
-| `updateTransactionDate` | 対象sourceの厳密一致明細1件の日付更新 | id, currentDate, merchant, amount, date |
-| `updateTransaction` | 対象sourceの厳密一致明細1件の金額・店舗名・カテゴリ更新(いずれか1つ以上) | id, currentDate, currentMerchant, currentAmount, [amount, merchant, category] |
+| `deleteTransaction` | 対象sourceの明細1件削除。date/merchant/amountを渡すと厳密照合、id のみなら旧来の先頭一致 | id, [date, merchant, amount], [rowId] |
+| `updateTransactionDate` | 対象sourceの厳密一致明細1件の日付更新 | id, currentDate, merchant, amount, date, [rowId] |
+| `updateTransaction` | 対象sourceの厳密一致明細1件の金額・店舗名・カテゴリ更新(いずれか1つ以上) | id, currentDate, currentMerchant, currentAmount, [amount, merchant, category], [rowId] |
 | `updateCategory` | 両sourceの同一店舗カテゴリとConfig更新 | merchant, category |
 | `addFixedCost` | 対象sourceへ固定費1件追加 | type, name, amount, day, category |
 | `deleteFixedCost` | 対象sourceの固定費1件削除。type/name/amount/dayを渡すと照合削除(idの行が一致すればその行、しなければ全行から最初の一致行、なければ`Fixed cost not found`)。idのみなら旧来の行番号指定 | [id], [type, name, amount, day, category] |
@@ -220,6 +242,16 @@ Next.js POSTプロキシは、固定費系actionは`fixedCosts`タグ、それ�
 完了後に再検証します(`revalidateTag(tag, { expire: 0 })`)。
 
 `deleteFixedCost`はUIから`id`と照合フィールド(type/name/amount/day/category)を送ります。
+
+明細一覧(GET)の各要素は`id`(MessageId)、`date`、`merchant`、`amount`、`category`、`type`に加え、
+H列に値があれば`rowId`を含みます(空なら省略)。
+
+単一明細の更新・削除で`rowId`(文字列)を渡すと、Script Lock内でH列が一致する行を探し、
+既存の照合値(MessageId・日付・店舗名・金額/変更前値)も一致する場合だけ更新・削除します。
+RowIdが一致しても内容が違えば`Transaction not found`です(別の行へはフォールバックしない)。
+シートにそのRowIdが無い場合は、RowIdが無い行(未backfill、またはH列がUUID以外)の中だけで従来の厳密照合を行います。
+`rowId`を送らない旧クライアントは従来どおりです。UUID形式でない`rowId`は`Invalid rowId`です。
+UIは単一明細の全書き込みで`rowId`を既存フィールドと一緒に送ります(旧GASは`rowId`を無視します)。
 
 ### 既知制約
 

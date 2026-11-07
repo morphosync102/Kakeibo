@@ -1,5 +1,6 @@
 export interface Expense {
-  id?: string;
+  id?: string; // MessageId (shared by rows from the same email)
+  rowId?: string; // RowId (column H): unique per row; absent until backfilled
   date: string;
   merchant: string;
   amount: number;

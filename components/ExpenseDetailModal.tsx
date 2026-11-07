@@ -118,7 +118,8 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             currentDate: expense.date,
             merchant: expense.merchant,
             amount: expense.amount,
-            date: newDate
+            date: newDate,
+            rowId: expense.rowId // unique row id when available; GAS still verifies the fields above
         }, '日付の更新に失敗しました');
     };
 
@@ -139,7 +140,8 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             currentDate: expense.date,
             currentMerchant: expense.merchant,
             currentAmount: expense.amount,
-            amount
+            amount,
+            rowId: expense.rowId
         }, '金額の更新に失敗しました');
     };
 
@@ -158,7 +160,8 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
                 currentDate: expense.date,
                 currentMerchant: expense.merchant,
                 currentAmount: expense.amount,
-                category
+                category,
+                rowId: expense.rowId
             }, 'カテゴリの更新に失敗しました');
             return;
         }
@@ -196,7 +199,8 @@ export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 
             // Extra fields for strict row matching (older GAS ignores them)
             date: expense.date,
             merchant: expense.merchant,
-            amount: expense.amount
+            amount: expense.amount,
+            rowId: expense.rowId
         }, '削除に失敗しました');
     };
 

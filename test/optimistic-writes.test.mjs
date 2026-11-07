@@ -93,3 +93,21 @@ test('fixed cost writes treat a timeout as possibly applied and refetch fresh da
   }
   assert.match(manageSource, /params\.set\('fresh', '1'\)/);
 });
+
+test('every single-row modal write sends rowId alongside the strict-match fields', () => {
+  for (const name of ['handleUpdateDate', 'handleUpdateAmount', 'handleDelete']) {
+    assert.match(body(modalSource, name), /rowId: expense\.rowId/, `${name} must send rowId`);
+  }
+  const category = body(modalSource, 'handleUpdateCategory');
+  const single = category.slice(0, category.indexOf("action: 'updateCategory'"));
+  assert.match(single, /action: 'updateTransaction'[\s\S]*rowId: expense\.rowId/, 'single-row category change sends rowId');
+  // Existing strict fields are still sent (old GAS / rows without RowId)
+  assert.match(body(modalSource, 'handleDelete'), /merchant: expense\.merchant/);
+});
+
+test('the Expense type carries an optional rowId and the hook compares by it', () => {
+  const api = read('lib/api.ts');
+  assert.match(api, /rowId\?: string;/);
+  const hook = read('hooks/useExpenses.ts');
+  assert.match(hook, /import \{ isSameExpense \} from '@\/lib\/expense-identity'/);
+});
