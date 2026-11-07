@@ -260,7 +260,7 @@ GAS・API層と画面層を分けてコード調査した結果。優先度は�
 | データモデル | ○ (2026-11-07 対応) | ~~明細に安定した行IDがない~~ → H列`RowId`を追加(下記2)。以下は対応前の評価: MessageId は同一メールの複数明細で共有され、行番号は削除でずれる。厳密照合・行ずれ・二重削除・固定費誤削除はすべてここが根本原因 |
 | 整合性 | △ | 3層キャッシュ(localStorage / Next.js / GAS)の無効化経路が複雑。排他制御なし |
 | セキュリティ | △ | Web 側の認証は堅いが、GAS URL が無認証の裏口。Vercel URL は公開(パスワードのみが扉) |
-| 運用 | △ | GAS は push で自動デプロイ、Vercel は手動 CLI。デプロイ順序(GAS→UI)を人が守る必要がある |
+| 運用 | ○ (2026-11-07 対応) | `deploy.yml` で test → GAS → 確認 → 承認 → Vercel を1本化(下記3)。対応前: GAS は push で自動、Vercel は手動 CLI で順序を人が守る必要があった |
 | 拡張性 | △ | 全期間の全明細を毎回まるごと返す。行数増でキャッシュ上限・転送量が効いてくる |
 
 ### 推奨する方向性(段階的)
@@ -270,7 +270,7 @@ GAS・API層と画面層を分けてコード調査した結果。優先度は�
    既存行は `backfillRowIds()` で採番。単一明細の更新・削除は `rowId` + 既存の照合値の両方一致で行い、
    `rowId` 無し・未採番行は従来の厳密照合にフォールバック。UI は `rowId` を同送し、`isSameExpense` も `rowId` 優先。
    MessageId 列は取込の重複判定のため残す(4-3 は別途)。
-3. **デプロイを1本化**: GitHub Actions で「GAS デプロイ → 成功したら Vercel デプロイ」を順に実行し、push だけで両方を正しい順序で反映する。
+3. **デプロイを1本化** ✅ 対応済み (2026-11-07): `.github/workflows/deploy.yml` が test → GAS(稼働中ビルドとの `gas/` 差分時のみ、`?action=version` で新ビルドを確認)→ GitHub Environment `production` の承認 → Vercel(`vercel deploy --prebuilt --prod`)を順に実行。GitHub 側の Secrets・Environment・Vercel Git 連携無効の設定はユーザー作業(SPECIFICATION「デプロイ」)。
 4. **ホスティングと認証**(下記の比較で選択)。
 
 ### ホスティング比較(公開URLの不安 vs 速度)

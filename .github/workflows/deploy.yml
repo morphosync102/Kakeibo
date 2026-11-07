@@ -1,0 +1,159 @@
+# Single production pipeline: test -> GAS (when gas/ changed) -> approval -> Vercel.
+#
+# - GAS deploys only when gas/ differs from the build the live Web App reports
+#   (doGet ?action=version). Comparing against the deployed build, not the
+#   previous push, keeps GAS correct even when a queued run was superseded.
+# - Vercel deploys from this workflow only (keep the Vercel Git integration
+#   disabled, otherwise it races this pipeline). The `production` environment
+#   must have required reviewers: the job waits there for approval.
+# Required repository settings and secrets: docs/SPECIFICATION.md "デプロイ".
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_gas:
+        description: Deploy GAS even if gas/ is unchanged since the deployed build
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+
+  gas:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Detect gas/ changes since the deployed build
+        id: changes
+        env:
+          GAS_API_URL: ${{ secrets.GAS_API_URL }}
+          GAS_PROXY_SECRET: ${{ secrets.GAS_PROXY_SECRET }}
+          FORCE_GAS: ${{ github.event_name == 'workflow_dispatch' && inputs.force_gas }}
+        run: |
+          set -uo pipefail
+          deployed=$(node scripts/gas-build.mjs)
+          if [ "$FORCE_GAS" = "true" ]; then
+            deploy=true; reason="forced by workflow_dispatch"
+          elif [ -z "$deployed" ]; then
+            deploy=true; reason="deployed build unknown"
+          elif ! git cat-file -e "$deployed^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$deployed" "$GITHUB_SHA"; then
+            deploy=true; reason="deployed build $deployed is not an ancestor of this commit"
+          elif git diff --quiet "$deployed" "$GITHUB_SHA" -- gas/; then
+            deploy=false; reason="gas/ unchanged since deployed build $deployed"
+          else
+            deploy=true; reason="gas/ changed since deployed build $deployed"
+          fi
+          echo "GAS deploy: $deploy ($reason)"
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.changes.outputs.deploy == 'true'
+        run: npm ci
+
+      - name: Restore clasp credentials
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          GAS_SCRIPT_ID: ${{ secrets.GAS_SCRIPT_ID }}
+        run: |
+          echo "$CLASPRC_JSON" > ~/.clasprc.json
+          printf '{"scriptId": "%s", "rootDir": "gas"}\n' "$GAS_SCRIPT_ID" > .clasp.json
+
+      - name: Stamp build id into the GAS source
+        if: steps.changes.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          sed -i "s/^const GAS_BUILD = 'dev';$/const GAS_BUILD = '$GITHUB_SHA';/" gas/コード.js
+          count=$(grep -c "^const GAS_BUILD = '$GITHUB_SHA';$" gas/コード.js || true)
+          if [ "$count" != "1" ]; then
+            echo "::error::GAS_BUILD placeholder not found exactly once (found $count)"
+            exit 1
+          fi
+
+      - name: Push source to Apps Script
+        if: steps.changes.outputs.deploy == 'true'
+        run: npx clasp push -f
+
+      - name: Deploy new version to the existing web app (URL stays stable)
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          GAS_DEPLOYMENT_ID: ${{ secrets.GAS_DEPLOYMENT_ID }}
+        run: npx clasp deploy -i "$GAS_DEPLOYMENT_ID" -d "GitHub Actions ${GITHUB_SHA::7}"
+
+      - name: Verify deployed build answers with this commit
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          GAS_API_URL: ${{ secrets.GAS_API_URL }}
+          GAS_PROXY_SECRET: ${{ secrets.GAS_PROXY_SECRET }}
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            build=$(node scripts/gas-build.mjs)
+            if [ "$build" = "$GITHUB_SHA" ]; then
+              echo "GAS Web App serves $build"
+              exit 0
+            fi
+            echo "Attempt $attempt: deployed build is '${build:-unknown}', waiting"
+            sleep 10
+          done
+          echo "::error::The GAS Web App does not report build $GITHUB_SHA"
+          exit 1
+
+  vercel:
+    needs: [test, gas]
+    if: ${{ !cancelled() && needs.test.result == 'success' && (needs.gas.result == 'success' || needs.gas.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment gate the production release
+    environment: production
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Pull Vercel production settings
+        run: npx --yes vercel@64.7.0 pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        run: npx --yes vercel@64.7.0 build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy prebuilt output to production
+        run: npx --yes vercel@64.7.0 deploy --prebuilt --prod --token="$VERCEL_TOKEN"

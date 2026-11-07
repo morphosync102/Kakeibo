@@ -210,6 +210,8 @@ GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシと
 - `GET /api/expenses?source=yahoo`: 個人用明細一覧
 - `GET /api/expenses?action=getFixedCosts[&source=yahoo]`: 固定費一覧
 
+GAS直接(プロキシ非経由、デプロイ確認用): `?action=version` → `{ "build": "<commit SHA または dev>" }`(認証対象)。
+
 `source`はGET/POST共通で、省略・空文字・`main`(家庭用)と`yahoo`(個人用)のみ受理します。
 それ以外(`Yahoo`等の表記ゆれを含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
 Next.jsプロキシはGASを呼ぶ前に検証し、省略・`main`・`yahoo`以外(空文字を含む)は
@@ -363,18 +365,64 @@ GASの変更には、VM sandboxを使う`test/gas-*.test.mjs`で回帰テスト�
 未認証・旧形式・改ざん・期限切れCookieの拒否、正規ログイン、認証前にGASを呼ばないことも検証します。
 両sourceの統計・検索・編集・削除・認証と、320×568／390×844／844×390のモーダル操作を検証します。
 
-### デプロイ順序
+### デプロイ(`.github/workflows/deploy.yml`)
 
-GAS API契約を変更する場合:
+`main`へのpush(または手動の`workflow_dispatch`)1回で、次の順に実行します。
+同時実行は1本に制限します(`concurrency`、実行中のデプロイは取り消さない)。
 
-1. `gas/コード.js`の変更をコミットし、`main`へpushする(UI変更とは別コミット)。
-2. GitHub Actions(`deploy-gas.yml`)が`clasp push`と既存デプロイIDへの
-   `clasp deploy`を自動実行するので、成功を確認する。
-3. その後、依存するWebアプリの変更をpushし、Vercel本番へデプロイする。
-4. 本番で対象操作を確認する。
+1. **test**: `npm ci` → `npm test` → `npm run lint` → `npm run build`(Node.js 24)。
+2. **gas**(testの成功後):
+   - 稼働中のGAS Web Appに`?action=version`を問い合わせ、返ったビルドID(commit SHA)と今回のcommitの間で
+     `gas/`に差分がある場合だけデプロイします(ビルドID不明・祖先でない場合もデプロイ。
+     `workflow_dispatch`の`force_gas`で強制可)。直前のpushではなく稼働中のビルドと比べるので、
+     待機中の実行が後続pushに置き換えられてもGAS変更を取りこぼしません。
+   - デプロイ時は`gas/コード.js`の`const GAS_BUILD = 'dev';`をcommit SHAに置換してから
+     `clasp push` → 既存デプロイIDへ`clasp deploy`(URLは不変)し、`?action=version`が
+     そのSHAを返すことを確認します(最大約1分リトライ)。確認できなければ失敗し、Vercelへは進みません。
+   - 問い合わせは`scripts/gas-build.mjs`が行い、応答本文やkeyはログに出しません。
+3. **vercel**(test成功かつgasが成功/スキップ): GitHub Environment`production`の承認待ちで停止し、
+   承認後に`vercel pull --environment=production` → `vercel build --prod` → `vercel deploy --prebuilt --prod`
+   (Vercel CLIはバージョン固定)を実行します。
 
-GAS変更がないWebのみの変更は、Vercelデプロイだけで完了します。
-VercelはGitHub連携ではなく手動CLIデプロイ運用です(`npx vercel --prod`)。
-pushしただけでは本番に反映されません。
+GAS変更とUI変更は同じpushに含めてかまいません(GASの確認後にUIが出ます)。
+ただし`git push`はユーザーの明示承認後に行い、本番反映はEnvironmentの承認で止まります。
+docsだけの変更でもvercel jobは承認待ちになります(承認しなければ反映されません)。
+
+`?action=version`(doGet)は読み取り専用で`{ "build": "<commit SHA>" }`だけを返し、
+プロキシ認証(`PROXY_SECRET`)の対象です。ローカルの`clasp push`では`dev`のままです。
+
+#### ユーザーがGitHub/Vercel側で行う設定
+
+| 種別 | 名前 | 内容 |
+| --- | --- | --- |
+| Secret | `CLASPRC_JSON` | clasp認証情報(既存) |
+| Secret | `GAS_SCRIPT_ID` | Apps ScriptのスクリプトID(既存) |
+| Secret | `GAS_DEPLOYMENT_ID` | 既存Webアプリのデプロイ ID(既存) |
+| Secret | `GAS_API_URL` | GAS Web AppのURL(Vercelの同名変数と同じ値)。デプロイ判定・確認に使用 |
+| Secret | `GAS_PROXY_SECRET` | 任意。GASの`PROXY_SECRET`を有効化している場合は同じ値 |
+| Secret | `VERCEL_TOKEN` | Vercelのアクセストークン |
+| Secret | `VERCEL_ORG_ID` | Vercelのチーム/ユーザーID(`.vercel/project.json`の`orgId`) |
+| Secret | `VERCEL_PROJECT_ID` | VercelのプロジェクトID(`.vercel/project.json`の`projectId`) |
+| Environment | `production` | 「Required reviewers」に本人を設定(承認ゲート)。Vercel用SecretはEnvironment secretでも可 |
+| Vercel | Git連携 | **無効のまま**にする(有効だとpushで並行デプロイされ、GAS→UIの順序が崩れる) |
+
+旧ワークフロー`deploy-gas.yml`は`deploy.yml`に統合して削除しました。
+
+注意:
+
+- 上記の設定(特に Required reviewers)を済ませる前に`deploy.yml`を push しないこと。未設定だと承認なしで本番に反映される。
+- 承認しない実行は放置せず「Reject」する(承認待ちの実行が concurrency を占有し、後続の push が待たされる)。
+- GAS は承認ゲートより前に自動デプロイされる(旧`deploy-gas.yml`と同じ挙動)。GAS も承認後にしたい場合は gas job にも
+  `environment: production`を付ける。
+
+#### ロールバック
+
+- GAS: `npx clasp deployments`/`npx clasp versions`で直前のバージョン番号を確認し、
+  `npx clasp deploy -V <前のバージョン番号> -i <デプロイID>`で既存デプロイを戻します(URLは不変)。
+  その後`?action=version`で戻ったビルドIDを確認します。次回のpushでは稼働中ビルドとの差分で再デプロイされます。
+- Vercel: `npx vercel rollback`(直前の本番デプロイへ)または`npx vercel rollback <デプロイURL>`、
+  もしくはダッシュボードで以前のデプロイを「Promote to Production」します。
+- UIだけ戻す場合もGAS API契約の互換性(旧UIで動くこと)を確認します。各ラウンドで新GAS+旧UIの組合せを検証済みです。
+
 手元からの緊急デプロイは`npm run gas:push`と`npm run gas:deploy`でも可能です
-(要`npx clasp login`と`.clasp.json`)。
+(要`npx clasp login`と`.clasp.json`。`GAS_BUILD`は`dev`のまま)。

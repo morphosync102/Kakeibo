@@ -16,14 +16,18 @@ or deployment flow. That specification is the design source of truth.
 3. Add or update a `test/gas-*.test.mjs` regression test.
 4. Clear the affected GAS cache after every successful write.
 5. Run `npm test`, `npm run lint`, and `npm run build`.
-6. Commit GAS changes separately from UI changes and push the GAS commit first.
-   GitHub Actions (`.github/workflows/deploy-gas.yml`) runs `clasp push` and deploys a
-   new version to the existing web app deployment (the URL stays stable). Confirm the
-   workflow succeeded before pushing UI changes that call a new action.
+6. Keep the GAS change backward compatible with the currently deployed UI (old UI + new GAS
+   must work). Pushing to `main` (after the user approves the push) runs
+   `.github/workflows/deploy.yml`: test → GAS deploy when `gas/` differs from the build the
+   live Web App reports (`?action=version`) → verify the new build → wait for approval on the
+   `production` environment → Vercel deploy. GAS and UI changes may go in the same push.
+7. Keep the line `const GAS_BUILD = 'dev';` exactly as is: the workflow replaces it with the
+   commit SHA before `clasp push`.
 
 Manual fallback: `npm run gas:push` / `npm run gas:deploy` (requires `npx clasp login`
 and a local `.clasp.json`; the script id is stored only in GitHub Secrets and local
-`.clasp.json`, never in the repository).
+`.clasp.json`, never in the repository). Rollback: `npx clasp deploy -V <previous version>
+-i <deploymentId>` (see `docs/SPECIFICATION.md`).
 
 ## Sources
 
@@ -95,6 +99,7 @@ Never insert columns before H: code depends on column numbers (G = Type).
 
 - GET default: read transactions
 - GET `getFixedCosts`: read fixed costs
+- GET `version`: `{ build }` only (commit SHA stamped by the deploy workflow, `dev` otherwise); authenticated
 - POST `addTransaction`
 - POST `deleteTransaction` (strict match with date/merchant/amount; id-only falls back to legacy first match)
 - POST `updateTransactionDate`
