@@ -5,6 +5,12 @@
 
 const SHEET_ID = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
 
+// Build id returned by doGet ?action=version. The deploy workflow
+// (.github/workflows/deploy.yml) replaces 'dev' with the commit SHA right
+// before `clasp push`, then checks the deployed Web App reports that SHA.
+// Keep this exact one-line form: the workflow matches it literally.
+const GAS_BUILD = 'dev';
+
 // Default Sheets
 const DATA_SHEET_NAME = 'Data';
 const CONFIG_SHEET_NAME = 'Config';
@@ -359,6 +365,9 @@ function jsonTextOutput(jsonStr) {
 function doGet(e) {
   if (!isAuthorizedRequest(e.parameter.key)) return responseJSON({error: 'Unauthorized'});
   const action = e.parameter.action;
+
+  // Deploy verification: read-only, exposes only the build id (commit SHA)
+  if (action === 'version') return responseJSON({build: GAS_BUILD});
   const source = normalizeSource(e.parameter.source); // 'main' | 'yahoo' | null
   if (!source) return responseJSON({error: 'Invalid source'});
 

@@ -113,3 +113,23 @@ test('time-driven functions are not affected by PROXY_SECRET', () => {
   const { gas } = loadGas({ secret: DUMMY_SECRET });
   assert.doesNotThrow(() => gas.processFixedCostsForSource());
 });
+
+// ---------------------------------------------------------------- deploy verification (action=version)
+
+test('GAS_BUILD is a single placeholder line the deploy workflow can stamp with the commit SHA', () => {
+  const matches = gasSource.match(/^const GAS_BUILD = 'dev';$/gm) || [];
+  assert.equal(matches.length, 1);
+});
+
+test('doGet action=version returns only the build id, behind the same authentication', () => {
+  const open = loadGas();
+  assert.deepEqual(get(open.gas, { action: 'version' }), { build: 'dev' });
+  assert.deepEqual(get(open.gas, { action: 'version', source: 'Yahoo' }), { build: 'dev' }, 'source is irrelevant for version');
+
+  const locked = loadGas({ secret: DUMMY_SECRET });
+  assert.deepEqual(get(locked.gas, { action: 'version' }), { error: 'Unauthorized' });
+  assert.deepEqual(get(locked.gas, { action: 'version', key: 'wrong' }), { error: 'Unauthorized' });
+  const ok = get(locked.gas, { action: 'version', key: DUMMY_SECRET });
+  assert.deepEqual(Object.keys(ok), ['build'], 'nothing but the build id is exposed');
+  assert.equal(ok.build, 'dev');
+});
