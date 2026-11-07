@@ -15,6 +15,17 @@ const YAHOO_DATA_SHEET_NAME = 'Yahoo_Data';
 const YAHOO_CONFIG_SHEET_NAME = 'Yahoo_Config';
 const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
 
+// Data / Yahoo_Data column H: RowId, a UUID assigned to every row on insert
+// (backfillRowIds() fills rows created before the column existed). Appended
+// after Type (G) so column-number based code keeps working. MessageId (E) stays:
+// it is shared by rows from the same email and used for import de-duplication.
+const ROW_ID_COLUMN = 8; // H
+const ROW_ID_HEADER = 'RowId';
+// Only Utilities.getUuid()-shaped values count as RowIds. Column H may already
+// hold manual notes on the production sheet; such values are ignored (the row
+// is treated as not numbered yet) instead of being exposed as an id.
+const ROW_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Cache Configuration
 const CACHE_TTL = 21600; // 6 hours (Max allowed)
 // CacheService values are limited to 100KB. Lists are stored in chunks of at
@@ -63,6 +74,62 @@ function normalizeSource(source) {
   if (source === undefined || source === null || source === '' || source === 'main') return 'main';
   if (source === 'yahoo') return 'yahoo';
   return null;
+}
+
+// --- Helper: RowId ---
+function newRowId() {
+  return Utilities.getUuid();
+}
+
+function isValidRowId(value) {
+  return typeof value === 'string' && ROW_ID_PATTERN.test(value);
+}
+
+// The RowId stored in a Data row (array of cell values), or null if column H
+// is empty or holds anything other than a UUID
+function getRowIdOf(row) {
+  const value = row[ROW_ID_COLUMN - 1];
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value);
+  return isValidRowId(text) ? text : null;
+}
+
+// Makes sure the sheet has a column H to write RowId into
+function ensureRowIdColumn(sheet) {
+  const maxColumns = sheet.getMaxColumns();
+  if (maxColumns < ROW_ID_COLUMN) sheet.insertColumnsAfter(maxColumns, ROW_ID_COLUMN - maxColumns);
+}
+
+// The optional `rowId` of a single-row update/delete request.
+// Returns {rowId: string|null} (null = not sent: legacy matching) or {error}.
+function readRowIdParam(params) {
+  const value = params.rowId;
+  if (value === undefined || value === null || value === '') return {rowId: null};
+  if (!isValidRowId(value)) return {error: 'Invalid rowId'};
+  return {rowId: value};
+}
+
+// Finds the Data row (index into `data`, header at 0) for a single-row write.
+// - rowId given and present in column H: that row, only if `matches` also
+//   holds (same content as the client saw); otherwise -1 (never another row).
+// - rowId given but not in the sheet: strict match among rows WITHOUT a RowId
+//   (not backfilled yet, or a non-UUID manual value in H); rows identified by
+//   another RowId are skipped.
+// - no rowId (old clients): first strict match, as before.
+function findTransactionRowIndex(data, rowId, matches) {
+  if (rowId !== null) {
+    for (let i = 1; i < data.length; i++) {
+      if (getRowIdOf(data[i]) === rowId) return matches(data[i]) ? i : -1;
+    }
+    for (let i = 1; i < data.length; i++) {
+      if (getRowIdOf(data[i]) === null && matches(data[i])) return i;
+    }
+    return -1;
+  }
+  for (let i = 1; i < data.length; i++) {
+    if (matches(data[i])) return i;
+  }
+  return -1;
 }
 
 // --- Helper: Get Target Sheet Names based on source ---
@@ -368,7 +435,9 @@ function getExpensesWithCache(source) {
       merchant: row[1],
       amount: row[2],
       category: row[3],
-      type: row[6] || 'Expense' // Column G (Index 6)
+      type: row[6] || 'Expense', // Column G (Index 6)
+      // Column H; omitted (undefined) unless it holds a valid RowId (UUID)
+      rowId: getRowIdOf(row) || undefined
     };
   });
 
@@ -433,6 +502,7 @@ function handleWriteAction(params, source) {
       const sheet = ss.getSheetByName(sheets.data);
       if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
+      ensureRowIdColumn(sheet);
       sheet.appendRow([
         params.date,
         params.merchant,
@@ -440,7 +510,8 @@ function handleWriteAction(params, source) {
         Number(params.amount) > 0 && params.type !== 'Income' ? params.category : (params.category || '未分類'),
         'manual_' + new Date().getTime(),
         new Date(),
-        params.type || 'Expense'
+        params.type || 'Expense',
+        newRowId()
       ]);
       result = {success: true, message: 'Added transaction'};
       shouldClearCache = true;
@@ -478,6 +549,9 @@ function handleWriteAction(params, source) {
       const sheet = ss.getSheetByName(sheets.data);
       if (!sheet) return {error: `No sheet: ${sheets.data}`};
 
+      const rowIdParam = readRowIdParam(params);
+      if (rowIdParam.error) return {error: rowIdParam.error};
+
       const data = sheet.getDataRange().getValues();
       const targetId = params.id;
 
@@ -491,20 +565,15 @@ function handleWriteAction(params, source) {
       const targetDate = hasStrictFields ? normalizeTransactionDate(params.date) : null;
       if (hasStrictFields && !targetDate) return {error: 'Invalid transaction date'};
 
-      let found = false;
-      for (let i = 1; i < data.length; i++) {
-        if (String(data[i][4]) !== String(targetId)) continue;
-        if (hasStrictFields) {
-          const matches =
-            normalizeTransactionDate(data[i][0]) === targetDate &&
-            String(data[i][1]) === String(params.merchant) &&
-            Number(data[i][2]) === Number(params.amount);
-          if (!matches) continue;
-        }
-        sheet.deleteRow(i + 1);
-        found = true;
-        break;
-      }
+      const index = findTransactionRowIndex(data, rowIdParam.rowId, row => {
+        if (String(row[4]) !== String(targetId)) return false;
+        if (!hasStrictFields) return true;
+        return normalizeTransactionDate(row[0]) === targetDate &&
+          String(row[1]) === String(params.merchant) &&
+          Number(row[2]) === Number(params.amount);
+      });
+      const found = index !== -1;
+      if (found) sheet.deleteRow(index + 1);
 
       if (found) {
         result = {success: true, message: 'Deleted'};
@@ -539,23 +608,21 @@ function handleWriteAction(params, source) {
       }
       if (Object.keys(updates).length === 0) return {error: 'No fields to update'};
 
+      const rowIdParam = readRowIdParam(params);
+      if (rowIdParam.error) return {error: rowIdParam.error};
+
       const data = sheet.getDataRange().getValues();
-      let found = false;
-
-      for (let i = 1; i < data.length; i++) {
-        const matches =
-          String(data[i][4]) === String(params.id) &&
-          normalizeTransactionDate(data[i][0]) === currentDate &&
-          String(data[i][1]) === String(params.currentMerchant) &&
-          Number(data[i][2]) === Number(params.currentAmount);
-
-        if (matches) {
-          if (updates.merchant !== undefined) sheet.getRange(i + 1, 2).setValue(updates.merchant);
-          if (updates.amount !== undefined) sheet.getRange(i + 1, 3).setValue(updates.amount);
-          if (updates.category !== undefined) sheet.getRange(i + 1, 4).setValue(updates.category);
-          found = true;
-          break;
-        }
+      const index = findTransactionRowIndex(data, rowIdParam.rowId, row =>
+        String(row[4]) === String(params.id) &&
+        normalizeTransactionDate(row[0]) === currentDate &&
+        String(row[1]) === String(params.currentMerchant) &&
+        Number(row[2]) === Number(params.currentAmount)
+      );
+      const found = index !== -1;
+      if (found) {
+        if (updates.merchant !== undefined) sheet.getRange(index + 1, 2).setValue(updates.merchant);
+        if (updates.amount !== undefined) sheet.getRange(index + 1, 3).setValue(updates.amount);
+        if (updates.category !== undefined) sheet.getRange(index + 1, 4).setValue(updates.category);
       }
 
       if (found) {
@@ -576,23 +643,18 @@ function handleWriteAction(params, source) {
       const currentDate = normalizeTransactionDate(params.currentDate);
       if (!currentDate) return {error: 'Invalid current transaction date'};
 
+      const rowIdParam = readRowIdParam(params);
+      if (rowIdParam.error) return {error: rowIdParam.error};
+
       const data = sheet.getDataRange().getValues();
-      let found = false;
-
-      for (let i = 1; i < data.length; i++) {
-        const rowDate = normalizeTransactionDate(data[i][0]);
-        const matches =
-          String(data[i][4]) === String(params.id) &&
-          rowDate === currentDate &&
-          String(data[i][1]) === String(params.merchant) &&
-          Number(data[i][2]) === Number(params.amount);
-
-        if (matches) {
-          sheet.getRange(i + 1, 1).setValue(newDate);
-          found = true;
-          break;
-        }
-      }
+      const index = findTransactionRowIndex(data, rowIdParam.rowId, row =>
+        String(row[4]) === String(params.id) &&
+        normalizeTransactionDate(row[0]) === currentDate &&
+        String(row[1]) === String(params.merchant) &&
+        Number(row[2]) === Number(params.amount)
+      );
+      const found = index !== -1;
+      if (found) sheet.getRange(index + 1, 1).setValue(newDate);
 
       if (found) {
         result = {success: true, message: 'Updated transaction date'};
@@ -754,18 +816,101 @@ function addDueFixedCosts(source) {
            row[4], // Category
            uniqueId,
            new Date(),
-           row[0]  // Type
+           row[0], // Type
+           newRowId()
          ]);
        }
     }
   });
 
   if (newRows.length > 0) {
+    ensureRowIdColumn(dataSheet);
     dataSheet.getRange(dataSheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
 
     // Clear cache since we added data
     clearCache(source);
   }
+}
+
+// --- Migration: RowId for existing rows (run once from the Apps Script editor) ---
+// Fills column H for every Data / Yahoo_Data row that has no RowId yet, writes
+// the header when H1 is empty, and never changes an existing value, so running
+// it again is harmless (rerun it after adding rows to the sheet by hand).
+// Both sheets are inspected first: if column H is already used for something
+// else (H1 neither empty nor "RowId", or non-UUID values below it) it aborts
+// with an error naming the sheet and count, and writes nothing to either sheet.
+// Otherwise each sheet is written with one setValues call under the script
+// lock and that source's cache is invalidated. Returns the counts per source.
+function backfillRowIds() {
+  return runWithScriptLock(() => {
+    const plans = ['main', 'yahoo'].map(planRowIdBackfill);
+    const problems = plans.filter(plan => plan.problem).map(plan => plan.problem);
+    if (problems.length > 0) {
+      throw new Error(`backfillRowIds aborted, nothing was written: ${problems.join('; ')}. Move the existing column H contents to another column, then run it again.`);
+    }
+    const result = {};
+    plans.forEach(plan => { result[plan.source] = applyRowIdBackfill(plan); });
+    console.log(`backfillRowIds: ${JSON.stringify(result)}`);
+    return result;
+  }, () => {
+    throw new Error('backfillRowIds: could not acquire the script lock; run it again later.');
+  }, FIXED_COST_LOCK_WAIT_MS);
+}
+
+// Read-only inspection of one source's Data sheet (must hold the script lock).
+// Never includes cell values in `problem` (they may be personal notes).
+function planRowIdBackfill(source) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheetName = getTargetSheets(source).data;
+  const sheet = ss.getSheetByName(sheetName);
+  const plan = {source: source, sheet: sheet, values: null, problem: null};
+  if (!sheet) return plan;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 1) return plan;
+
+  // Without a column H yet, every cell is empty
+  plan.values = sheet.getMaxColumns() < ROW_ID_COLUMN
+    ? Array.from({length: lastRow}, () => [''])
+    : sheet.getRange(1, ROW_ID_COLUMN, lastRow, 1).getValues();
+
+  const issues = [];
+  const header = plan.values[0][0];
+  if (header !== '' && header !== null && String(header) !== ROW_ID_HEADER) {
+    issues.push(`H1 is not empty or "${ROW_ID_HEADER}"`);
+  }
+  let foreign = 0;
+  for (let i = 1; i < plan.values.length; i++) {
+    const value = plan.values[i][0];
+    if (value !== '' && value !== null && value !== undefined && !isValidRowId(String(value))) foreign++;
+  }
+  if (foreign > 0) issues.push(`${foreign} non-UUID value(s) in column H`);
+  if (issues.length > 0) plan.problem = `${sheetName}: ${issues.join(', ')}`;
+  return plan;
+}
+
+// Writes one inspected plan (must hold the script lock). Returns rows filled.
+function applyRowIdBackfill(plan) {
+  if (!plan.sheet || !plan.values) return 0;
+  const values = plan.values;
+  let filled = 0;
+  let changed = false;
+  if (!values[0][0]) {
+    values[0][0] = ROW_ID_HEADER;
+    changed = true;
+  }
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][0] === '' || values[i][0] === null || values[i][0] === undefined) {
+      values[i][0] = newRowId();
+      filled++;
+      changed = true;
+    }
+  }
+  if (changed) {
+    ensureRowIdColumn(plan.sheet);
+    plan.sheet.getRange(1, ROW_ID_COLUMN, values.length, 1).setValues(values);
+    clearCache(plan.source);
+  }
+  return filled;
 }
 
 // --- Email Extraction (Main & Olive) ---
@@ -966,15 +1111,18 @@ function parseJcbBody(body) {
 
 // --- Shared Helpers ---
 
-// Appends parsed email rows (MessageId in column E) under the script lock.
+// Appends parsed email rows (MessageId in column E; RowId assigned here) under the script lock.
 // The duplicate check runs inside the lock so overlapping trigger runs cannot
 // insert the same message twice. Returns the number of rows added.
 function appendImportedRows(sheet, rows, source, label) {
   if (!sheet || rows.length === 0) return 0;
   return runWithScriptLock(() => {
     const existingIds = getExistingMessageIds(sheet);
-    const newRows = rows.filter(row => !existingIds.has(row[4]));
+    const newRows = rows
+      .filter(row => !existingIds.has(row[4]))
+      .map(row => row.slice(0, ROW_ID_COLUMN - 1).concat([newRowId()]));
     if (newRows.length === 0) return 0;
+    ensureRowIdColumn(sheet);
     sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
     clearCache(source);
     return newRows.length;

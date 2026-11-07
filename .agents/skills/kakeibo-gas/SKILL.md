@@ -68,6 +68,18 @@ The spreadsheet ID is configured through the GAS Script Property `SHEET_ID`. Do 
 - E: MessageId
 - F: Timestamp
 - G: Type
+- H: RowId (UUID value, unique per row; assigned on every insert path; `backfillRowIds()` fills old rows).
+  Only UUID-shaped values count as RowIds; anything else in H (e.g. a manual note) is ignored and the
+  row is matched the legacy way.
+
+RowId maintenance:
+
+- After adding rows to Data / Yahoo_Data by hand, run `backfillRowIds()` again from the editor.
+- When copying/pasting rows in the sheet, clear column H of the pasted rows first (a duplicated RowId makes
+  the copies uneditable), then run `backfillRowIds()` again.
+- If column H is already used for something else, `backfillRowIds()` aborts without writing to either
+  sheet (the error names the sheet and the count only). Move the existing H contents to another column,
+  then run it again.
 
 For aggregation, treat `Type === "Income"` as income and all other rows as expenses. If `Category` is empty, use `未分類`.
 
@@ -75,6 +87,9 @@ MessageId is not guaranteed to be unique because one email can produce multiple 
 rows. Single-row mutations (`updateTransactionDate`, `updateTransaction`, `deleteTransaction`)
 therefore match date, merchant, and amount in addition to the id. `deleteTransaction` keeps a
 legacy id-only first-match fallback for old clients; new callers must send the strict fields.
+When the request also carries `rowId`, the row with that RowId is used only if the strict fields
+match too (otherwise `Transaction not found`); an unknown rowId falls back to rows without a RowId.
+Never insert columns before H: code depends on column numbers (G = Type).
 
 ## API Actions
 

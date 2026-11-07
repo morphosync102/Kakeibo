@@ -23,6 +23,8 @@ function createSheet(name, rows, events) {
       return { getValues: () => rows.map(row => [...row]) };
     },
     getLastRow: () => rows.length,
+    getMaxColumns: () => 26,
+    insertColumnsAfter: () => {},
     getRange: (row, column, numRows = 1, numColumns = 1) => ({
       getValues: () => {
         events.push(`read:${name}`);
@@ -121,6 +123,7 @@ function loadGas({ sheets = {}, lockAvailable = true, onLock, gmail } = {}) {
     },
     UrlFetchApp: {},
     Utilities: {
+      getUuid: () => '00000000-0000-4000-8000-000000000000',
       formatDate: (date) => `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`,
     },
   };

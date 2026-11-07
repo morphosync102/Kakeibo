@@ -20,6 +20,7 @@ function loadGas({ secret } = {}) {
   const sheet = {
     getDataRange: () => ({ getValues: () => rows.map(row => [...row]) }),
     getLastRow: () => rows.length,
+    getMaxColumns: () => 26,
     getRange: (row, column) => ({ setValue: (value) => { rows[row - 1][column - 1] = value; } }),
     appendRow: (row) => rows.push([...row]),
     deleteRow: (row) => rows.splice(row - 1, 1),
@@ -44,6 +45,7 @@ function loadGas({ secret } = {}) {
     Utilities: {
       DigestAlgorithm: { SHA_256: 'SHA_256' },
       Charset: { UTF_8: 'UTF_8' },
+      getUuid: () => '00000000-0000-4000-8000-000000000000',
       // Apps Script returns signed bytes
       computeDigest: (algorithm, value) => {
         digests.push(algorithm);
