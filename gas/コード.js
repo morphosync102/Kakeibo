@@ -26,6 +26,35 @@ const MAX_CACHE_CHUNKS = 30;
 const LOCK_WAIT_MS = 20000; // Web App requests: answer Busy rather than hang
 const FIXED_COST_LOCK_WAIT_MS = 120000; // daily trigger: a skipped day is not retried
 
+// --- Helper: proxy authentication (IMPROVEMENTS 4-1) ---
+// The Next.js proxy sends the shared secret as `key` (query for doGet, body for
+// doPost). Script Property PROXY_SECRET enables the check. While it is unset
+// (migration period) every request passes and a warning is logged; remove that
+// fallback once the secret is configured on both sides.
+// Returns true when the request may proceed. Never logs the key.
+function isAuthorizedRequest(key) {
+  const secret = PropertiesService.getScriptProperties().getProperty('PROXY_SECRET');
+  if (!secret) {
+    console.warn('PROXY_SECRET is not set: Web App requests are NOT authenticated (migration period).');
+    return true;
+  }
+  if (typeof key !== 'string' || key === '') return false;
+  return constantTimeEquals(key, secret);
+}
+
+// Compares SHA-256 digests of both values over all 32 bytes, so the time taken
+// does not depend on where (or whether) the inputs differ, nor on their length.
+function constantTimeEquals(a, b) {
+  const digestA = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, a, Utilities.Charset.UTF_8);
+  const digestB = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, b, Utilities.Charset.UTF_8);
+  let diff = digestA.length ^ digestB.length;
+  const length = Math.max(digestA.length, digestB.length);
+  for (let i = 0; i < length; i++) {
+    diff |= (digestA[i] | 0) ^ (digestB[i] | 0);
+  }
+  return diff === 0;
+}
+
 // --- Helper: source validation ---
 // Accepted: absent (undefined / null / '') or 'main' -> 'main', 'yahoo' -> 'yahoo'.
 // Anything else returns null and must be rejected with {error: 'Invalid source'}
@@ -261,6 +290,7 @@ function jsonTextOutput(jsonStr) {
 
 // --- API: Read Data ---
 function doGet(e) {
+  if (!isAuthorizedRequest(e.parameter.key)) return responseJSON({error: 'Unauthorized'});
   const action = e.parameter.action;
   const source = normalizeSource(e.parameter.source); // 'main' | 'yahoo' | null
   if (!source) return responseJSON({error: 'Invalid source'});
@@ -366,6 +396,9 @@ function doPost(e) {
       console.log('LINE webhook received; email forwarding disabled.');
       return responseJSON({success: true, ignored: 'lineWebhook'});
     }
+
+    // LINE calls the webhook directly (no key); every other request is authenticated
+    if (!isAuthorizedRequest(params.key)) return responseJSON({error: 'Unauthorized'});
 
     const source = normalizeSource(params.source); // 'main' | 'yahoo' | null
     if (!source) return responseJSON({error: 'Invalid source'});

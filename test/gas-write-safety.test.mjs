@@ -521,7 +521,7 @@ test('a cache invalidation failure after a successful write still reports succes
   const result = post(gas, { action: 'addTransaction', date: '2026/07/05', merchant: 'Once', amount: 100, category: '食費' });
   assert.equal(result.success, true, 'the row was written; reporting failure would make the UI resend it');
   assert.equal(sheets.Data.rows.filter(row => row[1] === 'Once').length, 1);
-  assert.ok(events.some(e => e.startsWith('warn:')), 'the invalidation failure is logged');
+  assert.ok(events.some(e => e.startsWith('warn:') && e.includes('rotation failed')), 'the invalidation failure is logged');
   assert.ok(![...cache.store.keys()].some(key => key.endsWith('_chunks')), 'fallback removes the current generation chunks');
   assert.equal(get(gas, {}).length, 2, 'the next read sees the new row');
 
