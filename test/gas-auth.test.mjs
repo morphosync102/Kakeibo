@@ -111,7 +111,7 @@ test('LINE webhook payloads stay unauthenticated but can never read or write tra
 
 test('time-driven functions are not affected by PROXY_SECRET', () => {
   const { gas } = loadGas({ secret: DUMMY_SECRET });
-  assert.doesNotThrow(() => gas.processFixedCostsForSource());
+  assert.doesNotThrow(() => gas.processFixedCostsForSource('main'));
 });
 
 // ---------------------------------------------------------------- deploy verification (action=version)

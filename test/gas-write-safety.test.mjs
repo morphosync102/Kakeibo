@@ -208,7 +208,7 @@ test('processFixedCosts waits longer for the lock (trigger run) and logs that a 
   const today = new Date();
   const fixed = [[...FIXED_HEADER], ['Expense', 'Daily', 100, today.getDate(), '固定費']];
   const busy = loadGas({ sheets: { Data: [[...DATA_HEADER]], Fixed: fixed }, lockAvailable: false });
-  busy.gas.processFixedCostsForSource('yahoo');
+  busy.gas.processFixedCostsForSource('main'); // the source whose sheets exist (a missing one is skipped before the lock)
   assert.ok(busy.events.includes('lock:wait:120000'));
   const warning = busy.events.find(e => e.startsWith('warn:'));
   assert.match(warning, /not retried/);
@@ -222,13 +222,13 @@ test('processFixedCosts takes the lock per source and skips (logged) when busy',
   const today = new Date();
   const fixed = [[...FIXED_HEADER], ['Expense', 'Daily', 100, today.getDate(), '固定費']];
   const busy = loadGas({ sheets: { Data: [[...DATA_HEADER]], Fixed: fixed.map(r => [...r]) }, lockAvailable: false });
-  busy.gas.processFixedCostsForSource();
+  busy.gas.processFixedCostsForSource('main');
   assert.equal(busy.sheets.Data.rows.length, 1);
   assert.ok(busy.events.some(e => e.startsWith('warn:')), 'a skipped run is logged');
 
   const ok = loadGas({ sheets: { Data: [[...DATA_HEADER]], Fixed: fixed.map(r => [...r]) } });
-  ok.gas.processFixedCostsForSource();
-  ok.gas.processFixedCostsForSource(); // second run must not duplicate
+  ok.gas.processFixedCostsForSource('main');
+  ok.gas.processFixedCostsForSource('main'); // second run must not duplicate
   assert.equal(ok.sheets.Data.rows.length, 2);
   assert.ok(ok.events.indexOf('read:Data') > ok.events.indexOf('lock:acquired'));
 });

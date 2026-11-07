@@ -12,7 +12,9 @@ or deployment flow. That specification is the design source of truth.
 ## Required Workflow
 
 1. Update `gas/コード.js`; never treat the deployed Apps Script editor as the only source.
-2. Preserve `main` and `yahoo` source separation.
+2. Preserve source separation (`main` / `yahoo` / `yuki`). Resolve every per-source value through the
+   `SOURCES` registry (`getTargetSheets` / `getSourceConfig`); never add an `if (source === 'yahoo') … else main`
+   style fallback. An unknown or missing source must throw.
 3. Add or update a `test/gas-*.test.mjs` regression test.
 4. Clear the affected GAS cache after every successful write.
 5. Run `npm test`, `npm run lint`, and `npm run build`.
@@ -31,8 +33,22 @@ and a local `.clasp.json`; the script id is stored only in GitHub Secrets and lo
 
 ## Sources
 
+Registry: `SOURCES` in `gas/コード.js` (sheets, label, LINE destination property, `requiresActor`).
+
 - `main`: 家庭用 kakeibo
 - `yahoo`: 個人用 kakeibo
+- `yuki`: Yuki 用 kakeibo. `requiresActor: true`: the Web App answers `{ error: 'Forbidden' }` for it until
+  actor verification (design G2) exists. Time-driven functions (fixed costs, monthly report) and
+  `backfillRowIds` already include it.
+
+Adding a source: add a `SOURCES` entry, run `setupSourceSheets()` from the editor (idempotent; creates only
+missing sheets with the headers below), and update `docs/SPECIFICATION.md`.
+
+`normalizeSource` maps an absent / empty Web App `source` to `main` for old clients only (doGet/doPost);
+internal functions (`getTargetSheets`, `getCacheSourceKey` / `clearCache`, `processFixedCostsForSource`,
+`sendMonthlyKakeiboReportForSource`) require an exact registry id and throw otherwise.
+`processFixedCosts` / `sendMonthlyKakeiboReports` loop over the registry with a try/catch per source and rethrow
+the failed sources at the end. Fixed costs skip a source whose sheets do not exist before taking the lock.
 
 ## Spreadsheet
 
@@ -50,12 +66,20 @@ The spreadsheet ID is configured through the GAS Script Property `SHEET_ID`. Do 
 - `Yahoo_Config`
 - `Yahoo_Fixed`
 
-### Config / Yahoo_Config columns
+### yuki sheets
+
+- `Yuki_Data`
+- `Yuki_Config`
+- `Yuki_Fixed`
+
+Created by `setupSourceSheets()` / `setupSourceSheets('yuki')` (Yuki_Data already has the H1 `RowId` header).
+
+### Config / Yahoo_Config / Yuki_Config columns
 
 - A: 支払い先
 - B: 分類
 
-### Fixed / Yahoo_Fixed columns
+### Fixed / Yahoo_Fixed / Yuki_Fixed columns
 
 - A: Type
 - B: Name
@@ -63,7 +87,7 @@ The spreadsheet ID is configured through the GAS Script Property `SHEET_ID`. Do 
 - D: Day
 - E: Category
 
-### Data / Yahoo_Data columns
+### Data / Yahoo_Data / Yuki_Data columns
 
 - A: Date
 - B: Merchant
@@ -113,7 +137,7 @@ When adding or changing an action, update the caller, GAS implementation, tests,
 
 ## Monthly LINE Reports
 
-GAS sends previous-month reports for both sources on a monthly Apps Script trigger:
+GAS sends previous-month reports for every registry source on a monthly Apps Script trigger:
 
 - Trigger function: `sendMonthlyKakeiboReports`
 - Schedule: every month on the 10th at 09:00
@@ -153,6 +177,11 @@ Use the LINE Messaging API Push endpoint:
 - URL: `https://api.line.me/v2/bot/message/push`
 - `main` destination: `LINE_DESTINATION_MAIN` groupId
 - `yahoo` destination: `LINE_DESTINATION_YAHOO` userId
+- `yuki` destination: `LINE_DESTINATION_YUKI` userId (optional; set by LINE linking, design G4)
+
+An unset destination is a failure for `main` / `yahoo` (`Missing Script Property`; the other sources are
+still sent, then the run throws naming the failed source). Only a `lineOptional` source (`yuki`) is skipped
+with a warning while its property is unset. A report is never sent to another source's destination.
 
 Script Properties required:
 
@@ -160,6 +189,7 @@ Script Properties required:
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
+- `LINE_DESTINATION_YUKI` (optional until Yuki links LINE)
 - `PROXY_SECRET` (optional during migration: shared secret checked as `key`; must equal Vercel `GAS_PROXY_SECRET`)
 
 Never store these values in the repository, project skills, tests, or documentation:

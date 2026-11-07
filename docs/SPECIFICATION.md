@@ -19,12 +19,17 @@ Browser
 
 ### データソース
 
-| source | 用途 | 画面ルート | シート接頭辞 |
-| --- | --- | --- | --- |
-| `main`または未指定 | 家庭用 | `/`, `/statistics`, `/calendar`, `/manage` | なし |
-| `yahoo` | 個人用 | `/yahoo`, `/yahoo/statistics`, `/yahoo/calendar`, `/yahoo/manage` | `Yahoo_` |
+| source | 用途 | 画面ルート | シート | 月次レポート宛先 Property | Web App |
+| --- | --- | --- | --- | --- | --- |
+| `main`または未指定 | 家庭用 | `/`, `/statistics`, `/calendar`, `/manage` | `Data` / `Config` / `Fixed` | `LINE_DESTINATION_MAIN` | 利用可 |
+| `yahoo` | 個人用 | `/yahoo`, `/yahoo/statistics`, `/yahoo/calendar`, `/yahoo/manage` | `Yahoo_Data` / `Yahoo_Config` / `Yahoo_Fixed` | `LINE_DESTINATION_YAHOO` | 利用可 |
+| `yuki` | Yuki 用 | (未実装。U1 で `/yuki` 配下を追加予定) | `Yuki_Data` / `Yuki_Config` / `Yuki_Fixed` | `LINE_DESTINATION_YUKI` | **未公開**(`{ "error": "Forbidden" }`。G2 の actor 照合導入後に actor 必須で公開) |
 
 コンポーネント、API、GASの全レイヤーでsource分離を維持します。
+GASはsourceレジストリ(`gas/コード.js`の`SOURCES`)を正本とし、シート名・キャッシュキー・LINE宛先・ラベルを
+すべてレジストリから引きます。未知のsource(内部処理での省略を含む)は例外とし、`main`へは落ち込みません。
+「未指定=main」はWeb App入力(`doGet`/`doPost`の`source`)の旧クライアント互換としてのみ残しています。
+`yuki`のシートはGASエディタで`setupSourceSheets()`(または`setupSourceSheets('yuki')`)を実行して作成します(§3)。
 
 ## 2. 画面仕様
 
@@ -121,8 +126,17 @@ Browser
 ## 3. データモデル
 
 Spreadsheet IDはGAS Script Property `SHEET_ID`から取得します。
+各sourceのData / Config / Fixedは同じ列構成です(§1のデータソース表)。
 
-### Data / Yahoo_Data
+#### sourceのシート作成(`setupSourceSheets`)
+
+GASエディタから`setupSourceSheets()`を実行すると、レジストリの全sourceについて、存在しないシートだけを
+下記の見出し行付きで作成します(Dataは見出しにH列`RowId`を含むため`backfillRowIds()`は不要)。
+既存のシートは一切変更しないため冪等で、実際には新しいsource(`Yuki_*`)だけが作られます。
+`setupSourceSheets('yuki')`のようにsourceを指定すると、そのsourceだけを対象にします(未知のsourceは例外)。
+Script Lock内で実行し、シートを作成したsourceのキャッシュを無効化します。
+
+### Data / Yahoo_Data / Yuki_Data
 
 | 列 | 名前 | 内容 |
 | --- | --- | --- |
@@ -149,24 +163,25 @@ H列はUUID形式(`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)の値だけをRowIdと
 #### RowIdの導入手順
 
 1. GASをデプロイする(新規行からRowIdが付く。既存行はRowId無しのまま従来の照合で動作)。
-2. GASエディタから`backfillRowIds()`を1回実行する(Script Lock内でData/Yahoo_Dataを別々に処理し、
+2. GASエディタから`backfillRowIds()`を1回実行する(Script Lock内でレジストリ全sourceのData
+   (Data/Yahoo_Data/Yuki_Data。存在しないシートは0件)を別々に処理し、
    H列が空の行だけ採番、H1が空ならヘッダ`RowId`を書き込み、各sourceのキャッシュを無効化。
    冪等なので再実行しても既存値は変わりません)。
    H列が既に別用途で使われている場合(H1が空でも`RowId`でもない、またはH2以降にUUID以外の値がある)は、
-   両シートとも何も書き込まずにエラーで中止します(メッセージはシート名と件数のみ)。
+   全シートとも何も書き込まずにエラーで中止します(メッセージはシート名と件数のみ)。
    H列の内容を別の列へ移してから再実行してください。
 3. UIをデプロイする(UIはbackfill前でも、旧GASでも動作します)。
 
 シートへ手作業で行を追加した場合は、`backfillRowIds()`を再実行してRowIdを採番します。
 
-### Config / Yahoo_Config
+### Config / Yahoo_Config / Yuki_Config
 
 | 列 | 名前 | 内容 |
 | --- | --- | --- |
 | A | 支払い先 | 自動分類に使う部分一致キーワード |
 | B | 分類 | カテゴリ |
 
-### Fixed / Yahoo_Fixed
+### Fixed / Yahoo_Fixed / Yuki_Fixed
 
 | 列 | 名前 | 内容 |
 | --- | --- | --- |
@@ -212,8 +227,14 @@ GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシと
 
 GAS直接(プロキシ非経由、デプロイ確認用): `?action=version` → `{ "build": "<commit SHA または dev>" }`(認証対象)。
 
-`source`はGET/POST共通で、省略・空文字・`main`(家庭用)と`yahoo`(個人用)のみ受理します。
-それ以外(`Yahoo`等の表記ゆれを含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
+`source`はGET/POST共通で、GASはレジストリの`main`(家庭用)・`yahoo`(個人用)・`yuki`(Yuki用)と、
+旧クライアント互換の省略・空文字(=`main`)を認識します。
+- 読み書きできるのは省略・空文字・`main`・`yahoo`です。
+- `yuki`は登録済みですが、Web Appでは利用者の照合(`actor`、G2)が入るまでGET/POSTとも
+  `{ "error": "Forbidden" }`を返し、何も読み書きしません(action判定より前)。
+- それ以外(`Yahoo`等の表記ゆれ、文字列以外を含む)は`{ "error": "Invalid source" }`を返し、何も読み書きしません。
+- 「省略=main」の解釈はWeb App入力(`doGet`/`doPost`)だけで、GAS内部の関数(シート・キャッシュキー・宛先の解決)は
+  sourceの明示を必須とし、省略・未知は例外にします。
 Next.jsプロキシはGASを呼ぶ前に検証し、省略・`main`・`yahoo`以外(空文字を含む)は
 HTTP 400 `{ "error": "Invalid source" }`を返します。
 
@@ -278,7 +299,11 @@ UIは単一明細の全書き込みで`rowId`を既存フィールドと一緒�
 
 ### 固定費
 
-`processFixedCosts()`を日次トリガーで実行します。IDは月・名称・sourceから生成し、
+`processFixedCosts()`を日次トリガーで実行します。レジストリの全source(main → yahoo → yuki)を順に処理し、
+FixedまたはDataシートが無いsourceはロックを取る前にスキップします。1つのsourceで例外が出ても残りのsourceは処理し、
+最後に失敗したsource名を含む例外を投げます(トリガーの失敗通知が届く)。
+`processFixedCostsForSource(source)`はsource必須です(省略・未知は例外。mainへの既定値はありません)。
+IDは`fixed_<YYYYMM>_<名称>_<source>`(従来と同じ書式)で、
 同月の重複登録を防ぎます。重複判定と追加はsourceごとにScript Lock内で行い、
 ロックは最大120秒待ちます。取得できない回はその日の分が追加されず、翌日のトリガーでも
 補完されない(当日日付の行のみ対象のため)ので、警告ログを確認して当日中に再実行または手入力します。
@@ -288,7 +313,13 @@ UIは単一明細の全書き込みで`rowId`を既存フィールドと一緒�
 - トリガー関数: `sendMonthlyKakeiboReports`
 - 実行予定: 毎月10日 09:00
 - 対象期間: 前月
-- 送信先: `LINE_DESTINATION_MAIN` / `LINE_DESTINATION_YAHOO`
+- 送信先: sourceごとにレジストリの宛先Property(`LINE_DESTINATION_MAIN` / `LINE_DESTINATION_YAHOO` /
+  `LINE_DESTINATION_YUKI`)。各sourceの明細はそのsourceの宛先にのみ送ります。
+- レジストリの全sourceを順に処理します。1つのsourceで失敗しても残りのsourceは送り、
+  最後に失敗したsource名を含む例外を投げます(トリガーの失敗通知が届く)。
+- 宛先Propertyが未設定の場合: `main` / `yahoo`は従来どおり失敗(`Missing Script Property`)として扱います。
+  レジストリで`lineOptional`の`yuki`だけは、LINE連携前を想定して警告ログを残して送信をスキップします。
+  いずれの場合も他sourceの宛先へ送ることはありません。
 - 内容: 収入、支出、収支、前月比、カテゴリ別支出、高額支出トップ5
 
 LINE webhook形式のPOSTは、メール転送や家計簿更新をせず成功応答で無視します。
@@ -301,8 +332,9 @@ LINE webhook形式のPOSTは、メール転送や家計簿更新をせず成功�
 | Next.js | `unstable_cache`(`expenses`/`fixedCosts`タグ、クエリ別キー)、5分再検証。GASへの生fetchは`no-store`。`fresh=1`は迂回 | POST完了後に`revalidateTag(tag, { expire: 0 })` |
 | GAS | source・data/fixed別Script Cache、6時間 | GAS書き込み成功後に`clearCache(source)` |
 
-GAS Script Cacheはsourceごとの世代トークン`kakeibo_{main|yahoo}_gen`(data/fixed共通、
-source省略・空文字は`main`)を持ち、一覧は`<key>_<gen>_chunks`(チャンク数)と
+GAS Script Cacheはsourceごとの世代トークン`kakeibo_{main|yahoo|yuki}_gen`(data/fixed共通、
+Web Appのsource省略・空文字は`main`に正規化してから使う。キー生成は正規化済みのsourceのみ受け付け、
+省略・未知は例外)を持ち、一覧は`<key>_<gen>_chunks`(チャンク数)と
 `<key>_<gen>_0`〜(本体)に分割して`putAll`で保存します(`<key>`は`kakeibo_{src}_{data|fixed}`、
 値の100KB上限対策、最大30チャンク)。
 
@@ -340,6 +372,8 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `LINE_CHANNEL_ACCESS_TOKEN`
 - `LINE_DESTINATION_MAIN`
 - `LINE_DESTINATION_YAHOO`
+- `LINE_DESTINATION_YUKI`: Yuki の月次レポート宛先(LINE userId)。任意。未設定の間は yuki の月次レポートを送らない
+  (値の設定方法は設計書 §5.4 の LINE 連携。G4 で実装予定)
 - `PROXY_SECRET`: プロキシ認証の共有シークレット(Vercelの`GAS_PROXY_SECRET`と同じ値。未設定時は認証なし=移行期間)
 
 実値はリポジトリ、テスト、ドキュメントへ保存しません。

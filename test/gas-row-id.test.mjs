@@ -133,7 +133,7 @@ test('every path that appends to Data / Yahoo_Data writes a unique RowId into co
 
   assert.equal(post(gas, { action: 'addTransaction', date: '2026/07/05', merchant: 'Manual main', amount: 10, category: '食費' }).success, true);
   assert.equal(post(gas, { action: 'addTransaction', source: 'yahoo', date: '2026/07/05', merchant: 'Manual yahoo', amount: 20, category: '食費' }).success, true);
-  gas.processFixedCostsForSource();
+  gas.processFixedCostsForSource('main');
   gas.processFixedCostsForSource('yahoo');
   gas.extractRakutenEmails();
   gas.extractOliveEmails();

@@ -1,6 +1,6 @@
 /**
- * Kakeibo Automation - Universal Ver 2.2 (Multi-Source Support + Caching)
- * Supports: Main & Yahoo (Olive) Sheets
+ * Kakeibo Automation - Universal Ver 2.3 (Source Registry + Caching)
+ * Sources: see SOURCES (main / yahoo / yuki)
  */
 
 const SHEET_ID = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
@@ -20,6 +20,45 @@ const FIXED_SHEET_NAME = 'Fixed';
 const YAHOO_DATA_SHEET_NAME = 'Yahoo_Data';
 const YAHOO_CONFIG_SHEET_NAME = 'Yahoo_Config';
 const YAHOO_FIXED_SHEET_NAME = 'Yahoo_Fixed';
+
+// --- Source registry ---
+// One entry per kakeibo. Every per-source lookup (sheets, cache key, LINE
+// destination, label) and every per-source loop (fixed costs, monthly reports,
+// backfillRowIds, setupSourceSheets) goes through this table. A lookup for an
+// unknown source throws instead of falling back to main, so a missing branch
+// can never write one kakeibo's rows into another kakeibo's sheets.
+// - lineKey: Script Property holding the monthly report's LINE destination.
+// - lineOptional: when lineKey is unset, the monthly report of this source is
+//   skipped with a warning (yuki before LINE linking). Otherwise an unset
+//   destination is an error, so the trigger run is reported as failed.
+// - requiresActor: the Web App (doGet/doPost) serves this source only to a
+//   request carrying a verified user (`actor`, added in G2 of
+//   docs/design/2026-11-yuki-and-passkeys.md). Until that verification exists
+//   such a source is refused with {error: 'Forbidden'}; the current UI never
+//   sends it. Time-driven functions and editor functions are not affected.
+const SOURCES = Object.freeze({
+  main: Object.freeze({
+    data: DATA_SHEET_NAME, config: CONFIG_SHEET_NAME, fixed: FIXED_SHEET_NAME,
+    label: '家庭用', lineKey: 'LINE_DESTINATION_MAIN', lineOptional: false, requiresActor: false
+  }),
+  yahoo: Object.freeze({
+    data: YAHOO_DATA_SHEET_NAME, config: YAHOO_CONFIG_SHEET_NAME, fixed: YAHOO_FIXED_SHEET_NAME,
+    label: '個人用', lineKey: 'LINE_DESTINATION_YAHOO', lineOptional: false, requiresActor: false
+  }),
+  yuki: Object.freeze({
+    data: 'Yuki_Data', config: 'Yuki_Config', fixed: 'Yuki_Fixed',
+    label: 'Yuki', lineKey: 'LINE_DESTINATION_YUKI', lineOptional: true, requiresActor: true
+  })
+});
+const SOURCE_IDS = Object.freeze(Object.keys(SOURCES)); // processing order of the loops
+
+// Headers written by setupSourceSheets(); the same columns as the existing
+// main / yahoo sheets (Data column H = RowId, see ROW_ID_COLUMN below).
+const SOURCE_SHEET_HEADERS = Object.freeze({
+  data: ['Date', 'Merchant', 'Amount', 'Category', 'MessageId', 'Timestamp', 'Type', 'RowId'],
+  config: ['支払い先', '分類'],
+  fixed: ['Type', 'Name', 'Amount', 'Day', 'Category']
+});
 
 // Data / Yahoo_Data column H: RowId, a UUID assigned to every row on insert
 // (backfillRowIds() fills rows created before the column existed). Appended
@@ -73,12 +112,31 @@ function constantTimeEquals(a, b) {
 }
 
 // --- Helper: source validation ---
-// Accepted: absent (undefined / null / '') or 'main' -> 'main', 'yahoo' -> 'yahoo'.
-// Anything else returns null and must be rejected with {error: 'Invalid source'}
-// so a typo can never write personal data into the household sheets.
+// For Web App requests: absent (undefined / null / '') -> 'main' (old clients
+// omit source for the household kakeibo; kept for backward compatibility only),
+// a registry id string -> itself. Anything else (other spellings, non-strings,
+// inherited names like 'constructor') returns null and must be rejected with
+// {error: 'Invalid source'} so a typo can never write into another kakeibo.
 function normalizeSource(source) {
-  if (source === undefined || source === null || source === '' || source === 'main') return 'main';
-  if (source === 'yahoo') return 'yahoo';
+  if (source === undefined || source === null || source === '') return 'main';
+  return isSourceId(source) ? source : null;
+}
+
+function isSourceId(source) {
+  return typeof source === 'string' && Object.prototype.hasOwnProperty.call(SOURCES, source);
+}
+
+// The registry entry of an exact source id. No default: anything else
+// (including undefined) throws, so internal callers must pass a source.
+function getSourceConfig(source) {
+  if (!isSourceId(source)) throw new Error(`Unknown source: ${String(source).slice(0, 40)}`);
+  return SOURCES[source];
+}
+
+// Web App gate for a normalized source (see SOURCES.requiresActor). Returns
+// null when the request may proceed, otherwise the error response object.
+function checkWebAppSourceAccess(source) {
+  if (getSourceConfig(source).requiresActor) return {error: 'Forbidden'};
   return null;
 }
 
@@ -139,19 +197,35 @@ function findTransactionRowIndex(data, rowId, matches) {
 }
 
 // --- Helper: Get Target Sheet Names based on source ---
+// Throws for an unknown or missing source (no fallback to main).
 function getTargetSheets(source) {
-  if (source === 'yahoo') {
-    return {
-      data: YAHOO_DATA_SHEET_NAME,
-      config: YAHOO_CONFIG_SHEET_NAME,
-      fixed: YAHOO_FIXED_SHEET_NAME
-    };
-  }
+  const config = getSourceConfig(source);
   return {
-    data: DATA_SHEET_NAME,
-    config: CONFIG_SHEET_NAME,
-    fixed: FIXED_SHEET_NAME
+    data: config.data,
+    config: config.config,
+    fixed: config.fixed
   };
+}
+
+// Runs fn(source) for every registry source in order. A failure of one source
+// is logged and does not stop the others; after all sources ran, the failures
+// are rethrown as one error so the trigger run is still reported as failed.
+// Returns {source: fn result}.
+function runForEachSource(label, fn) {
+  const results = {};
+  const failed = [];
+  SOURCE_IDS.forEach(source => {
+    try {
+      results[source] = fn(source);
+    } catch (err) {
+      console.error(`${label} failed for ${source}: ${err}`);
+      failed.push(source);
+    }
+  });
+  if (failed.length > 0) {
+    throw new Error(`${label} failed for: ${failed.join(', ')} (the other sources were processed; see the log)`);
+  }
+  return results;
 }
 
 // --- Helper: Script lock ---
@@ -182,9 +256,11 @@ function runWithScriptLock(fn, onBusy, waitMs) {
 // can only store its (stale) list under a dead generation, and chunks from
 // different generations can never be mixed on read.
 
-// Callers pass an already-validated source; undefined / '' / 'main' share a key.
+// Exact registry id only: an unknown or missing source throws (callers pass a
+// source already normalized by doGet/doPost or an explicit internal id).
 function getCacheSourceKey(source) {
-  return `kakeibo_${normalizeSource(source) || 'main'}`;
+  getSourceConfig(source);
+  return `kakeibo_${source}`;
 }
 
 function getCacheKey(source, type) {
@@ -307,8 +383,11 @@ function getCacheKeysToClear(baseKey, gen) {
 }
 
 // Invalidates the data and fixed-cost caches of one source by rotating its
-// generation. Called after a successful write, so it never throws: reporting
-// an error for a write that already landed would make the UI resend it.
+// generation. Called after a successful write, so it never throws for a valid
+// source: reporting an error for a write that already landed would make the UI
+// resend it. An unknown source is a programming error (every write path
+// resolves its sheets via getTargetSheets first, which already throws) and
+// throws here before anything is touched.
 // 1. flush: commit pending sheet writes first, otherwise a doGet could pick up
 //    the new generation, read the pre-write sheet and cache the stale list.
 // 2. rotate the generation (invalidates everything cached under the old one).
@@ -316,6 +395,7 @@ function getCacheKeysToClear(baseKey, gen) {
 //    housekeeping when rotation worked, and the fallback when it failed.
 // Returns true when the generation was rotated.
 function clearCache(source) {
+  getCacheSourceKey(source); // validates; throws for an unknown source
   try {
     SpreadsheetApp.flush();
   } catch (err) {
@@ -368,8 +448,10 @@ function doGet(e) {
 
   // Deploy verification: read-only, exposes only the build id (commit SHA)
   if (action === 'version') return responseJSON({build: GAS_BUILD});
-  const source = normalizeSource(e.parameter.source); // 'main' | 'yahoo' | null
+  const source = normalizeSource(e.parameter.source); // a SOURCES id | null
   if (!source) return responseJSON({error: 'Invalid source'});
+  const denied = checkWebAppSourceAccess(source);
+  if (denied) return responseJSON(denied);
 
   if (action === 'getFixedCosts') {
     return getFixedCostsWithCache(source);
@@ -478,8 +560,10 @@ function doPost(e) {
     // LINE calls the webhook directly (no key); every other request is authenticated
     if (!isAuthorizedRequest(params.key)) return responseJSON({error: 'Unauthorized'});
 
-    const source = normalizeSource(params.source); // 'main' | 'yahoo' | null
+    const source = normalizeSource(params.source); // a SOURCES id | null
     if (!source) return responseJSON({error: 'Invalid source'});
+    const denied = checkWebAppSourceAccess(source);
+    if (denied) return responseJSON(denied);
 
     if (WRITE_ACTIONS.indexOf(params.action) === -1) {
       return responseJSON({error: 'Unknown action'});
@@ -674,7 +758,9 @@ function handleWriteAction(params, source) {
     }
 
     else if (action === 'updateCategory') {
-      // Update BOTH Main and Yahoo sheets
+      // Update BOTH Main and Yahoo sheets (the household/personal pair; yuki is
+      // never reached here: the Web App refuses it until G2 limits this action
+      // to the caller's category-sharing group)
       ['main', 'yahoo'].forEach(src => {
         const targetSheets = getTargetSheets(src);
 
@@ -771,18 +857,30 @@ function responseJSON(data) {
 }
 
 // --- Automation: Process Fixed Costs (Daily Trigger) ---
+// Every registry source, each with its own lock; a source whose sheets do not
+// exist yet is skipped. One failing source does not stop the others (the run
+// still ends with an error naming it, see runForEachSource).
 function processFixedCosts() {
-  processFixedCostsForSource(); // Default
-  processFixedCostsForSource('yahoo'); // Yahoo
+  runForEachSource('Fixed costs', processFixedCostsForSource);
 }
 
+// `source` is required (no default): an unknown or missing source throws.
 function processFixedCostsForSource(source) {
-  console.log(`--- Checking Fixed Costs for: ${source || 'default'} ---`);
+  const sheets = getTargetSheets(source);
+  console.log(`--- Checking Fixed Costs for: ${source} ---`);
+  // A source whose sheets do not exist yet (e.g. yuki before
+  // setupSourceSheets) is skipped without waiting for the lock.
+  // addDueFixedCosts checks again inside the lock.
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  if (!ss.getSheetByName(sheets.fixed) || !ss.getSheetByName(sheets.data)) {
+    console.log(`Fixed costs for ${source} skipped: ${sheets.fixed} or ${sheets.data} does not exist.`);
+    return;
+  }
   // Only rows whose day equals today are added, so a run that cannot get the
   // lock is NOT retried by tomorrow's trigger: wait longer and log loudly.
   runWithScriptLock(
     () => addDueFixedCosts(source),
-    () => console.warn(`Fixed costs for ${source || 'main'} were NOT added today: lock busy for ${FIXED_COST_LOCK_WAIT_MS / 1000}s. Tomorrow's trigger does not catch up (not retried); run processFixedCosts() again today or add them manually.`),
+    () => console.warn(`Fixed costs for ${source} were NOT added today: lock busy for ${FIXED_COST_LOCK_WAIT_MS / 1000}s. Tomorrow's trigger does not catch up (not retried); run processFixedCosts() again today or add them manually.`),
     FIXED_COST_LOCK_WAIT_MS
   );
 }
@@ -812,7 +910,8 @@ function addDueFixedCosts(source) {
     const scheduledDay = row[3];
 
     if (Number(scheduledDay) === currentDay) {
-       const uniqueId = `fixed_${currentMonthStr.replace('/', '')}_${row[1]}_${source || 'main'}`;
+       // Format kept as before (existing rows rely on it); source is always explicit
+       const uniqueId = `fixed_${currentMonthStr.replace('/', '')}_${row[1]}_${source}`;
 
        if (!existingIds.has(uniqueId)) {
          console.log(`Adding: ${row[1]}`);
@@ -842,17 +941,18 @@ function addDueFixedCosts(source) {
 }
 
 // --- Migration: RowId for existing rows (run once from the Apps Script editor) ---
-// Fills column H for every Data / Yahoo_Data row that has no RowId yet, writes
-// the header when H1 is empty, and never changes an existing value, so running
-// it again is harmless (rerun it after adding rows to the sheet by hand).
-// Both sheets are inspected first: if column H is already used for something
+// Fills column H for every Data row of every registry source (Data /
+// Yahoo_Data / Yuki_Data; a missing sheet counts 0) that has no RowId yet,
+// writes the header when H1 is empty, and never changes an existing value, so
+// running it again is harmless (rerun it after adding rows to the sheet by hand).
+// All sheets are inspected first: if column H is already used for something
 // else (H1 neither empty nor "RowId", or non-UUID values below it) it aborts
-// with an error naming the sheet and count, and writes nothing to either sheet.
+// with an error naming the sheet and count, and writes nothing to any sheet.
 // Otherwise each sheet is written with one setValues call under the script
 // lock and that source's cache is invalidated. Returns the counts per source.
 function backfillRowIds() {
   return runWithScriptLock(() => {
-    const plans = ['main', 'yahoo'].map(planRowIdBackfill);
+    const plans = SOURCE_IDS.map(planRowIdBackfill);
     const problems = plans.filter(plan => plan.problem).map(plan => plan.problem);
     if (problems.length > 0) {
       throw new Error(`backfillRowIds aborted, nothing was written: ${problems.join('; ')}. Move the existing column H contents to another column, then run it again.`);
@@ -920,6 +1020,40 @@ function applyRowIdBackfill(plan) {
     clearCache(plan.source);
   }
   return filled;
+}
+
+// --- Setup: per-source sheets (run from the Apps Script editor) ---
+// Creates the Data / Config / Fixed sheets of a source that do not exist yet,
+// with the header row of SOURCE_SHEET_HEADERS (Data includes H = RowId, so
+// the new Data sheet never needs backfillRowIds). An existing sheet is never
+// modified, so running it again is harmless.
+// setupSourceSheets('yuki') handles one source; without an argument (the way
+// the editor's Run button calls it) every registry source is handled, which in
+// practice creates only the sheets of a newly added source (Yuki_*).
+// Returns {source: [created sheet names]}.
+function setupSourceSheets(source) {
+  const targets = (source === undefined || source === null || source === '') ? SOURCE_IDS.slice() : [source];
+  targets.forEach(getSourceConfig); // validate everything before creating anything
+  return runWithScriptLock(() => {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const created = {};
+    targets.forEach(src => {
+      const sheets = getTargetSheets(src);
+      created[src] = [];
+      ['data', 'config', 'fixed'].forEach(type => {
+        const name = sheets[type];
+        if (ss.getSheetByName(name)) return;
+        const header = SOURCE_SHEET_HEADERS[type];
+        ss.insertSheet(name).getRange(1, 1, 1, header.length).setValues([header.slice()]);
+        created[src].push(name);
+      });
+      if (created[src].length > 0) clearCache(src);
+    });
+    console.log(`setupSourceSheets: ${JSON.stringify(created)}`);
+    return created;
+  }, () => {
+    throw new Error('setupSourceSheets: could not acquire the script lock; run it again later.');
+  }, FIXED_COST_LOCK_WAIT_MS);
 }
 
 // --- Email Extraction (Main & Olive) ---
@@ -1211,9 +1345,21 @@ function isLineWebhookPayload(params) {
 
 // --- Monthly LINE Reports ---
 
+// Every registry source. A lineOptional source whose destination Script
+// Property is not set is skipped with a warning (yuki before LINE linking); for
+// the other sources a missing destination throws as before. One failing source
+// does not stop the others (the run still ends with an error naming it, see
+// runForEachSource).
 function sendMonthlyKakeiboReports() {
-  sendMonthlyKakeiboReportForSource('main');
-  sendMonthlyKakeiboReportForSource('yahoo');
+  return runForEachSource('Monthly LINE report', source => {
+    const destinationKey = getMonthlyReportDestinationPropertyKey(source);
+    if (getSourceConfig(source).lineOptional &&
+        !PropertiesService.getScriptProperties().getProperty(destinationKey)) {
+      console.warn(`Monthly LINE report for ${source} skipped: Script Property ${destinationKey} is not set.`);
+      return {source: source, skipped: 'noDestination'};
+    }
+    return sendMonthlyKakeiboReportForSource(source);
+  });
 }
 
 function testSendMonthlyKakeiboReports() {
@@ -1228,7 +1374,10 @@ function testSendMonthlyKakeiboReportYahoo() {
   sendMonthlyKakeiboReportForSource('yahoo');
 }
 
+// `source` is required (no default): an unknown or missing source throws
+// before anything is read or sent.
 function sendMonthlyKakeiboReportForSource(source, now) {
+  getSourceConfig(source);
   const targetMonth = getMonthlyReportTargetMonth(now || new Date());
   const previousMonth = getPreviousMonthlyReportMonth(targetMonth);
   const rows = getMonthlyReportRows(source, targetMonth);
@@ -1240,7 +1389,7 @@ function sendMonthlyKakeiboReportForSource(source, now) {
   pushLineTextMessage(destination, text);
 
   return {
-    source: source || 'main',
+    source: source,
     destinationKey: destinationKey,
     targetMonth: formatMonthlyReportMonth(targetMonth),
     rows: rows.length,
@@ -1275,12 +1424,13 @@ function getPreviousMonthlyReportMonth(monthStart) {
   return new Date(monthStart.getFullYear(), monthStart.getMonth() - 1, 1);
 }
 
+// Registry lookups; an unknown source throws (never the household destination)
 function getMonthlyReportDestinationPropertyKey(source) {
-  return source === 'yahoo' ? 'LINE_DESTINATION_YAHOO' : 'LINE_DESTINATION_MAIN';
+  return getSourceConfig(source).lineKey;
 }
 
 function getMonthlyReportSourceLabel(source) {
-  return source === 'yahoo' ? '個人用' : '家庭用';
+  return getSourceConfig(source).label;
 }
 
 function buildMonthlyKakeiboReportText(source, targetMonth, rows, previousRows) {
