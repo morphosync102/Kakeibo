@@ -1,0 +1,22 @@
+{
+    "name": "Yuki Kakeibo",
+    "short_name": "Yuki Kakeibo",
+    "description": "Yuki's expenses",
+    "start_url": "/yuki",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#fdf2f8",
+    "theme_color": "#fdf2f8",
+    "icons": [
+        {
+            "src": "/image.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "/image.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ]
+}

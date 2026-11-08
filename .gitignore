@@ -45,6 +45,7 @@ next-env.d.ts
 !/public/image.png
 !/public/psyduck.png
 !/public/yahoo-manifest.json
+!/public/yuki-manifest.json
 
 # clasp (Apps Script CLI) - keep script id out of the repo
 .clasp.json

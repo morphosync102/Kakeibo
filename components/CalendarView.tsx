@@ -12,10 +12,11 @@ import BottomNav from '@/components/BottomNav';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import ExpenseSearch from './ExpenseSearch';
 import { Expense } from '@/lib/api';
+import { getSource, type SourceId } from '@/lib/sources';
+import { ACCENT_CLASSES, pickMode } from '@/lib/theme';
 
 interface CalendarViewProps {
-    source?: string;
-    isDarkMode?: boolean;
+    source: SourceId;
 }
 
 interface DayTotals {
@@ -31,7 +32,10 @@ function toDayKey(date: string) {
     return format(parsed, 'yyyy/MM/dd');
 }
 
-export default function CalendarView({ source, isDarkMode = false }: CalendarViewProps) {
+export default function CalendarView({ source }: CalendarViewProps) {
+    const { theme } = getSource(source);
+    const isDarkMode = theme.dark;
+    const accent = ACCENT_CLASSES[theme.accent];
     const { expenses, loading, error, refresh, removeLocal, updateLocal } = useExpenses(source);
     const [currentDate, setCurrentDate] = useState(new Date());
     const [direction, setDirection] = useState(0);
@@ -44,11 +48,11 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
     }, [error]);
 
     // Theme Colors
-    const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-white';
+    const bgColor = pickMode(accent.calendarPageBg, isDarkMode);
     const headerBg = isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
     const textColor = isDarkMode ? 'text-gray-100' : 'text-gray-800';
     const subTextColor = isDarkMode ? 'text-gray-400' : 'text-gray-600';
-    const cardBg = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100';
+    const cardBg = pickMode(accent.card, isDarkMode);
     const summaryBg = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-gray-50 border-gray-200';
 
     // Calendar Logic
@@ -153,8 +157,8 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
             className={clsx("min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))] overflow-x-hidden transition-colors", bgColor)}
         >
             <div className={clsx('flex gap-2 p-4', textColor)}>
-                <button aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} className={clsx('flex-1 rounded-xl py-3', view === 'calendar' && 'bg-indigo-600 text-white')}>カレンダー</button>
-                <button aria-pressed={view === 'search'} onClick={() => setView('search')} className={clsx('flex-1 rounded-xl py-3', view === 'search' && 'bg-indigo-600 text-white')}>支出検索</button>
+                <button aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} className={clsx('flex-1 rounded-xl py-3', view === 'calendar' && accent.segmentActive)}>カレンダー</button>
+                <button aria-pressed={view === 'search'} onClick={() => setView('search')} className={clsx('flex-1 rounded-xl py-3', view === 'search' && accent.segmentActive)}>支出検索</button>
             </div>
             {error && <div role="alert" className={clsx('px-4 py-2', textColor)}>{error}。保存済みデータは維持しています。
                 <button onClick={refresh} disabled={loading} className="ml-2 underline">再取得</button>
@@ -208,7 +212,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                             </div>
                             <div className="text-center flex-1">
                                 <div className="text-[10px] text-gray-400">収支</div>
-                                <div className={clsx("font-bold", monthlySummary.balance >= 0 ? (isDarkMode ? "text-indigo-400" : "text-indigo-600") : "text-red-500")}>
+                                <div className={clsx("font-bold", monthlySummary.balance >= 0 ? pickMode(accent.balancePositive, isDarkMode) : "text-red-500")}>
                                     {monthlySummary.balance.toLocaleString()}
                                 </div>
                             </div>
@@ -243,13 +247,13 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
                                         "aspect-[4/5] flex flex-col items-center justify-start py-1 relative transition-all cursor-pointer rounded-xl border border-transparent",
                                         !isCurrentMonth && "opacity-30",
                                         isSelected
-                                            ? (isDarkMode ? "bg-slate-800 border-indigo-500 shadow-md z-10" : "bg-white border-indigo-500 shadow-md z-10")
+                                            ? clsx(isDarkMode ? "bg-slate-800" : "bg-white", accent.selectedDayBorder, "shadow-md z-10")
                                             : (isDarkMode ? "hover:bg-slate-900" : "hover:bg-gray-50"),
                                     )}
                                 >
                                     <div className={clsx(
                                         "text-xs mb-0.5 font-medium",
-                                        isTodayDate ? "text-indigo-500 font-bold" : (isDarkMode ? "text-gray-300" : "text-gray-700")
+                                        isTodayDate ? clsx(accent.todayText, "font-bold") : (isDarkMode ? "text-gray-300" : "text-gray-700")
                                     )}>
                                         {format(day, 'd')}
                                     </div>
@@ -275,7 +279,7 @@ export default function CalendarView({ source, isDarkMode = false }: CalendarVie
 
                                     {/* Dot indicator for today */}
                                     {isTodayDate && !isSelected && (
-                                        <div className="absolute top-1 right-1 w-1 h-1 bg-indigo-500 rounded-full" />
+                                        <div className={clsx("absolute top-1 right-1 w-1 h-1 rounded-full", accent.todayDot)} />
                                     )}
                                 </div>
                             );

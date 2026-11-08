@@ -23,7 +23,7 @@ Browser
 | --- | --- | --- | --- | --- | --- |
 | `main`または未指定 | 家庭用 | `/`, `/statistics`, `/calendar`, `/manage` | `Data` / `Config` / `Fixed` | `LINE_DESTINATION_MAIN` | 利用可 |
 | `yahoo` | 個人用 | `/yahoo`, `/yahoo/statistics`, `/yahoo/calendar`, `/yahoo/manage` | `Yahoo_Data` / `Yahoo_Config` / `Yahoo_Fixed` | `LINE_DESTINATION_YAHOO` | 利用可 |
-| `yuki` | Yuki 用 | (未実装。U1 で `/yuki` 配下を追加予定) | `Yuki_Data` / `Yuki_Config` / `Yuki_Fixed` | `LINE_DESTINATION_YUKI` | actor 必須(actor 無しは`{ "error": "Forbidden" }`。§4「利用者の照合」) |
+| `yuki` | Yuki 用 | `/yuki`, `/yuki/statistics`, `/yuki/calendar`, `/yuki/manage` | `Yuki_Data` / `Yuki_Config` / `Yuki_Fixed` | `LINE_DESTINATION_YUKI` | actor 必須(actor 無しは`{ "error": "Forbidden" }`。§4「利用者の照合」) |
 
 コンポーネント、API、GASの全レイヤーでsource分離を維持します。
 GASはsourceレジストリ(`gas/コード.js`の`SOURCES`)を正本とし、シート名・キャッシュキー・LINE宛先・ラベルを
@@ -31,9 +31,31 @@ GASはsourceレジストリ(`gas/コード.js`の`SOURCES`)を正本とし、シ
 「未指定=main」はWeb App入力(`doGet`/`doPost`の`source`)の旧クライアント互換としてのみ残しています。
 `yuki`のシートはGASエディタで`setupSourceSheets()`(または`setupSourceSheets('yuki')`)を実行して作成します(§3)。
 
+UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート・見出し・テーマ)で、id・順序・ラベルはGASの`SOURCES`と一致することを
+テスト(`test/sources-theme.test.mjs`)で確認します。プロキシの`isAllowedSource`も同じidを受理します。
+
 ## 2. 画面仕様
 
-下部タブは「レポート・統計・カレンダー・管理」の順で、遷移先でもsourceを維持します。
+下部タブは「レポート・統計・カレンダー・管理」の順で、遷移先でもsourceを維持します(パスの先頭`/yahoo`・`/yuki`でsourceを決め、
+それ以外は`main`。`?source=`クエリでは切り替えません)。
+
+全画面は同じコンポーネントに`source`を必ず渡します(`main`も明示し、未指定時に`main`とみなす既定値はありません)。
+一覧取得(`/api/expenses?source=...`)・書き込みも常に`source`を送ります。
+
+### テーマ
+
+| source | 配色 | アクセント | 背景・ステータスバー | PWA |
+| --- | --- | --- | --- | --- |
+| `main` | ライト | indigo | 白(`#ffffff`) | `app/manifest.ts`(start_url `/`) |
+| `yahoo` | ダーク | indigo | `#020617` | `public/yahoo-manifest.json`(start_url `/yahoo`) |
+| `yuki` | ライト(淡いピンク) | pink | `#fdf2f8`(pink-50)。カードは白、境界線はpink-100 | `public/yuki-manifest.json`(start_url `/yuki`、scope `/`、アイコンは専用画像の用意まで`/image.png`を流用) |
+
+- 各画面はsourceのテーマ(`lib/sources.ts`)からダーク配色の有無とアクセントを決め、アクセント色とライト時の背景・カードの
+  クラスは`lib/theme.ts`の対応表から取ります。Tailwindが検出できるよう、対応表には完全なクラス名だけを書きます。
+- indigoの対応表は従来main・yahooで使っていたクラスそのもので、main・yahooの見た目は変わりません(テストで固定)。
+- 円グラフのカテゴリ色はテーマに関係なく共通です。
+- `/yuki`配下はログインが必要です。現時点のセッションには利用者情報が無く、GASは`yuki`を利用者の照合(actor)付きの要求に
+  しか返さないため、`/yuki`の一覧は取得エラー(「データの取得に失敗しました」)の表示になります(U2でセッションに利用者を持たせるまで)。
 
 ### 認証
 

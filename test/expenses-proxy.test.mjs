@@ -13,9 +13,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const secret = randomBytes(32).toString('hex');
 
-test('the proxy accepts only an omitted source, "main" or "yahoo"', () => {
-  for (const ok of [undefined, null, 'main', 'yahoo']) assert.equal(isAllowedSource(ok), true, String(ok));
-  for (const bad of ['', 'Yahoo', 'MAIN', 'other', 'yahoo ', 1, {}, [], true]) assert.equal(isAllowedSource(bad), false, JSON.stringify(bad));
+test('the proxy accepts only an omitted source, "main", "yahoo" or "yuki"', () => {
+  for (const ok of [undefined, null, 'main', 'yahoo', 'yuki']) assert.equal(isAllowedSource(ok), true, String(ok));
+  for (const bad of ['', 'Yahoo', 'MAIN', 'Yuki', 'other', 'yahoo ', 1, {}, [], true]) assert.equal(isAllowedSource(bad), false, JSON.stringify(bad));
 });
 
 test('only an array from GAS is a cacheable list; anything else throws', () => {
@@ -118,8 +118,9 @@ test('GET and POST reject an invalid source with 400 without calling GAS', async
   assert.equal(route.calls.length, 0);
   assert.equal(route.revalidated.length, 0);
 
-  for (const query of ['', '?source=main', '?source=yahoo']) assert.equal((await route.GET(getReq(query))).status, 200, query);
-  for (const source of [undefined, 'main', 'yahoo']) assert.equal((await route.POST(postReq({ action: 'addTransaction', source }))).status, 200);
+  // yuki reaches GAS, which refuses it until requests carry an actor (U2)
+  for (const query of ['', '?source=main', '?source=yahoo', '?source=yuki']) assert.equal((await route.GET(getReq(query))).status, 200, query);
+  for (const source of [undefined, 'main', 'yahoo', 'yuki']) assert.equal((await route.POST(postReq({ action: 'addTransaction', source }))).status, 200);
 });
 
 test('fresh=1 bypasses unstable_cache, reads GAS without the fresh flag, and is still validated', async () => {
@@ -157,11 +158,11 @@ test('fetchExpenses asks for fresh data only when requested', async (t) => {
   const { fetchExpenses } = await import('../lib/api.ts');
   const urls = [];
   t.mock.method(globalThis, 'fetch', async (url) => { urls.push(url); return Response.json([]); });
-  await fetchExpenses();
+  await fetchExpenses('main');
   await fetchExpenses('yahoo');
   await fetchExpenses('yahoo', { fresh: true });
-  await fetchExpenses(undefined, { fresh: true });
-  assert.deepEqual(urls, ['/api/expenses', '/api/expenses?source=yahoo', '/api/expenses?source=yahoo&fresh=1', '/api/expenses?fresh=1']);
+  await fetchExpenses('main', { fresh: true });
+  assert.deepEqual(urls, ['/api/expenses?source=main', '/api/expenses?source=yahoo', '/api/expenses?source=yahoo&fresh=1', '/api/expenses?source=main&fresh=1']);
 });
 
 // ---------------------------------------------------------------- GAS proxy key (4-1)

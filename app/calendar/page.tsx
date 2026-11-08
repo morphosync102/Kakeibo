@@ -3,5 +3,5 @@
 import CalendarView from '@/components/CalendarView';
 
 export default function CalendarPage() {
-    return <CalendarView />;
+    return <CalendarView source="main" />;
 }

@@ -5,7 +5,7 @@ import { SESSION_COOKIE, verifySession } from '@/lib/session';
 export async function middleware(request: NextRequest) {
 
     // Protected Routes
-    const protectedPaths = ['/', '/statistics', '/calendar', '/manage', '/api/expenses', '/yahoo'];
+    const protectedPaths = ['/', '/statistics', '/calendar', '/manage', '/api/expenses', '/yahoo', '/yuki'];
 
     // Check if current path matches any protected path
     const isProtected = protectedPaths.some(path =>

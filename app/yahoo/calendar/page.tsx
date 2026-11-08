@@ -3,5 +3,5 @@
 import CalendarView from '@/components/CalendarView';
 
 export default function YahooCalendarPage() {
-    return <CalendarView source="yahoo" isDarkMode={true} />;
+    return <CalendarView source="yahoo" />;
 }

@@ -3,5 +3,5 @@
 import Dashboard from '@/components/Dashboard';
 
 export default function YahooKakeibo() {
-    return <Dashboard source="yahoo" isDarkMode={true} />;
+    return <Dashboard source="yahoo" />;
 }

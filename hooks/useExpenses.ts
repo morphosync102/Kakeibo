@@ -4,10 +4,17 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchExpenses, Expense } from '@/lib/api';
 import { isSameExpense } from '@/lib/expense-identity';
 import { fetchDiscardAction, getPendingWrites, getSettledWrites, shouldApplyFetch, subscribePendingWrites } from '@/lib/write-queue';
+import type { SourceId } from '@/lib/sources';
 
 const STORAGE_KEY = 'kakeibo_expenses_cache';
 
-export function useExpenses(source?: string) {
+// Per-source localStorage key. main keeps the key it had before source became
+// required, so existing devices keep their cached list.
+function cacheKeyOf(source: SourceId): string {
+    return source === 'main' ? STORAGE_KEY : `${STORAGE_KEY}_${source}`;
+}
+
+export function useExpenses(source: SourceId) {
     const [expenses, setExpensesState] = useState<Expense[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -22,7 +29,7 @@ export function useExpenses(source?: string) {
     // Incremented by every load; tells a discarded load whether a newer one is on its way
     const loadSeq = useRef(0);
 
-    const cacheKey = source ? `${STORAGE_KEY}_${source}` : STORAGE_KEY;
+    const cacheKey = cacheKeyOf(source);
 
     const persist = useCallback((data: Expense[]) => {
         setExpensesState(data);

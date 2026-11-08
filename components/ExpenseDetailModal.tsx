@@ -6,12 +6,14 @@ import { X, Trash2, Save, AlertCircle, CalendarDays, JapaneseYen } from 'lucide-
 import { Expense } from '@/lib/api';
 import { categoriesForType } from '@/lib/categories';
 import { isWriteTimeout, postWrite } from '@/lib/write-queue';
+import type { SourceId } from '@/lib/sources';
 
 interface ExpenseDetailModalProps {
     isOpen: boolean;
     onClose: () => void;
     expense: Expense | null;
-    source?: string;
+    source: SourceId; // required: every write names its kakeibo
+
     onUpdate: () => void; // Callback to refresh data
     onLocalRemove?: (expense: Expense) => void; // Optimistic removal
     onLocalUpdate?: (expense: Expense, changes: Partial<Expense>) => void; // Optimistic update
@@ -21,7 +23,7 @@ function toDateInputValue(date: string) {
     return date.replace(/\//g, '-').slice(0, 10);
 }
 
-export default function ExpenseDetailModal({ isOpen, onClose, expense, source = 'main', onUpdate, onLocalRemove, onLocalUpdate }: ExpenseDetailModalProps) {
+export default function ExpenseDetailModal({ isOpen, onClose, expense, source, onUpdate, onLocalRemove, onLocalUpdate }: ExpenseDetailModalProps) {
     const [selectedCategory, setSelectedCategory] = useState(expense?.category || '');
     const [selectedDate, setSelectedDate] = useState(expense ? toDateInputValue(expense.date) : '');
     const [selectedAmount, setSelectedAmount] = useState(expense ? String(expense.amount) : '');

@@ -5,11 +5,16 @@ import { Bar, CartesianGrid, ComposedChart, Legend, Line, LineChart, ReferenceLi
 import { clsx } from 'clsx';
 import { useExpenses } from '@/hooks/useExpenses';
 import { aggregateCategories, aggregateExpenses, categoryExpensesByYear, dateKey, type StatisticsPeriod } from '@/lib/expense-analysis';
+import { getSource, type SourceId } from '@/lib/sources';
+import { ACCENT_CLASSES, pickMode } from '@/lib/theme';
 import BottomNav from './BottomNav';
 
 const yen = (value: number) => `¥${value.toLocaleString()}`;
 
-export default function StatisticsView({ source, isDarkMode = false }: { source?: string; isDarkMode?: boolean }) {
+export default function StatisticsView({ source }: { source: SourceId }) {
+    const { theme } = getSource(source);
+    const isDarkMode = theme.dark;
+    const accent = ACCENT_CLASSES[theme.accent];
     const { expenses, loading, error, refresh } = useExpenses(source);
     const [mode, setMode] = useState<StatisticsPeriod['mode']>('all');
     const [year, setYear] = useState(() => new Date().getFullYear());
@@ -29,7 +34,7 @@ export default function StatisticsView({ source, isDarkMode = false }: { source?
         const last = values.reduce((max, value) => Math.max(max, value), new Date().getFullYear());
         return Array.from({ length: last - first + 1 }, (_, index) => last - index);
     }, [expenses]);
-    const card = clsx('rounded-2xl border p-4', isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-200');
+    const card = clsx('rounded-2xl border p-4', pickMode(accent.statsCard, isDarkMode));
     const field = clsx('rounded-lg border p-2 min-w-0 text-base', isDarkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-gray-300');
     const invalidMonth = mode === 'month' && !dateKey(month + '-01');
     const hasPeriodData = expenses.some(item => {
@@ -38,13 +43,13 @@ export default function StatisticsView({ source, isDarkMode = false }: { source?
     });
 
     return (
-        <main className={clsx('min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))]', isDarkMode ? 'bg-slate-950 text-gray-100' : 'bg-gray-50 text-gray-900')}>
+        <main className={clsx('min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))]', pickMode(accent.pageBg, isDarkMode), isDarkMode ? 'text-gray-100' : 'text-gray-900')}>
             <div className="max-w-4xl mx-auto p-4 space-y-5">
                 <h1 className="text-xl font-bold">統計</h1>
                 <div className="flex gap-2" aria-label="集計期間">
                     {(['all', 'year', 'month'] as const).map((value, index) => (
                         <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}
-                            className={clsx('flex-1 rounded-xl p-3 font-semibold', mode === value ? 'bg-indigo-600 text-white' : card)}>
+                            className={clsx('flex-1 rounded-xl p-3 font-semibold', mode === value ? accent.segmentActive : card)}>
                             {['全期間', '年', '月'][index]}
                         </button>
                     ))}

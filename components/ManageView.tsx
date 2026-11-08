@@ -8,10 +8,11 @@ import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES } from '@/lib/categories';
 import { isWriteTimeout, postWrite } from '@/lib/write-queue';
+import { getSource, type SourceId } from '@/lib/sources';
+import { ACCENT_CLASSES, pickMode, type AccentClasses } from '@/lib/theme';
 
 interface ManageViewProps {
-    source?: string;
-    isDarkMode?: boolean;
+    source: SourceId;
 }
 
 type TransactionType = 'Expense' | 'Income';
@@ -32,8 +33,10 @@ interface FixedCost {
     category: string;
 }
 
-export default function ManageView({ source, isDarkMode = false }: ManageViewProps) {
-    const isYahoo = source === 'yahoo';
+export default function ManageView({ source }: ManageViewProps) {
+    const sourceInfo = getSource(source);
+    const isDarkMode = sourceInfo.theme.dark;
+    const accent = ACCENT_CLASSES[sourceInfo.theme.accent];
 
     const [activeTab, setActiveTab] = useState<'entry' | 'fixed'>('entry');
     const [formData, setFormData] = useState({
@@ -100,8 +103,8 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
         });
     };
 
-    const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-gray-50';
-    const cardBg = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100';
+    const bgColor = pickMode(accent.pageBg, isDarkMode);
+    const cardBg = pickMode(accent.card, isDarkMode);
     const textColor = isDarkMode ? 'text-gray-100' : 'text-gray-800';
     const headerBg = isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
 
@@ -110,7 +113,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
             {/* Header */}
             < header className={clsx("px-6 py-4 sticky top-0 z-10 shadow-sm safe-area-top flex justify-between items-center", headerBg)} >
                 <h1 className={clsx("text-xl font-bold", textColor)}>
-                    {isYahoo ? '個人kakeibo管理' : '管理・入力'}
+                    {sourceInfo.manageTitle}
                 </h1>
             </header >
 
@@ -122,7 +125,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                         className={clsx(
                             "flex-1 py-2 text-sm font-medium rounded-lg transition-colors",
                             activeTab === 'entry'
-                                ? "bg-indigo-50 text-indigo-600"
+                                ? accent.tabActive
                                 : (isDarkMode ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
                         )}
                     >
@@ -133,7 +136,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                         className={clsx(
                             "flex-1 py-2 text-sm font-medium rounded-lg transition-colors",
                             activeTab === 'fixed'
-                                ? "bg-indigo-50 text-indigo-600"
+                                ? accent.tabActive
                                 : (isDarkMode ? "text-gray-400 hover:bg-slate-800" : "text-gray-500 hover:bg-gray-50")
                         )}
                     >
@@ -150,7 +153,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                         {/* Manual Entry Section */}
                         <section className={clsx("p-5 rounded-2xl shadow-sm border", cardBg)}>
                             <div className={clsx("flex items-center gap-2 mb-5 font-bold border-b pb-3", textColor, isDarkMode ? "border-slate-800" : "border-gray-100")}>
-                                <PlusCircle size={20} className="text-indigo-500" />
+                                <PlusCircle size={20} className={accent.icon} />
                                 <h2>{formData.type === 'Income' ? '収入の入力' : '支出の入力'}</h2>
                             </div>
 
@@ -176,14 +179,14 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                                         type="date"
                                         value={formData.date}
                                         onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                                        className={clsx("border rounded-lg p-3 text-sm flex-1 outline-none focus:ring-2 focus:ring-indigo-100",
+                                        className={clsx("border rounded-lg p-3 text-sm flex-1 outline-none focus:ring-2", accent.focusRing,
                                             isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
                                         )}
                                     />
                                     <select
                                         value={formData.category}
                                         onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                                        className={clsx("flex-1 border rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-indigo-100",
+                                        className={clsx("flex-1 border rounded-lg p-3 text-sm outline-none focus:ring-2", accent.focusRing,
                                             isDarkMode ? "bg-slate-800 border-slate-700 text-white" : "bg-gray-50 border-gray-200"
                                         )}
                                     >
@@ -198,7 +201,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                                     placeholder={formData.type === 'Income' ? "内容 (任意)" : "内容 (任意)"}
                                     value={formData.merchant}
                                     onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
-                                    className={clsx("w-full border rounded-lg p-3 text-sm outline-none focus:ring-2 focus:ring-indigo-100",
+                                    className={clsx("w-full border rounded-lg p-3 text-sm outline-none focus:ring-2", accent.focusRing,
                                         isDarkMode ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
                                     )}
                                 />
@@ -210,7 +213,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                                         placeholder="金額"
                                         value={formData.amount}
                                         onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-                                        className={clsx("w-full border rounded-lg p-3 pl-8 text-sm outline-none focus:ring-2 focus:ring-indigo-100 font-bold",
+                                        className={clsx("w-full border rounded-lg p-3 pl-8 text-sm outline-none focus:ring-2 font-bold", accent.focusRing,
                                             isDarkMode ? "bg-slate-800 border-slate-700 text-white placeholder-gray-500" : "bg-gray-50 border-gray-200"
                                         )}
                                         inputMode="numeric"
@@ -221,7 +224,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
                                     onClick={handleSubmit}
                                     className={clsx(
                                         "w-full font-bold py-3.5 rounded-xl shadow-md transition-all flex justify-center items-center gap-2 active:scale-[0.98]",
-                                        formData.type === 'Income' ? "bg-emerald-500 hover:bg-emerald-600 text-white" : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                                        formData.type === 'Income' ? "bg-emerald-500 hover:bg-emerald-600 text-white" : accent.primaryButton
                                     )}
                                 >
                                     <Check size={18} />
@@ -242,7 +245,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
 
                 {
                     activeTab === 'fixed' && (
-                        <FixedCostSection categories={categories} source={source} isDarkMode={isDarkMode} />
+                        <FixedCostSection categories={categories} source={source} isDarkMode={isDarkMode} accent={accent} />
                     )
                 }
 
@@ -252,7 +255,7 @@ export default function ManageView({ source, isDarkMode = false }: ManageViewPro
     );
 }
 
-function FixedCostSection({ categories, source, isDarkMode }: { categories: Categories, source?: string, isDarkMode?: boolean }) {
+function FixedCostSection({ categories, source, isDarkMode, accent }: { categories: Categories, source: SourceId, isDarkMode: boolean, accent: Readonly<AccentClasses> }) {
     const [fixedCosts, setFixedCosts] = useState<FixedCost[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
@@ -278,7 +281,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
         setIsLoading(true);
         try {
             const params = new URLSearchParams({ action: 'getFixedCosts' });
-            if (source) params.set('source', source);
+            params.set('source', source);
             if (fresh) params.set('fresh', '1');
             const url = `/api/expenses?${params.toString()}`;
             const res = await fetch(url);
@@ -363,7 +366,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
             .finally(() => fetchFixedCosts(true));
     };
 
-    const cardBg = isDarkMode ? "bg-slate-900 border-slate-800" : "bg-white border-gray-100";
+    const cardBg = pickMode(accent.card, isDarkMode);
     const textColor = isDarkMode ? "text-gray-200" : "text-gray-800";
 
     return (
@@ -396,7 +399,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
                     {fixedCosts.map((item, index) => (
                         <div key={`${item.id}-${index}`} className={clsx("flex justify-between items-center py-3 border-b last:border-0 group", isDarkMode ? "border-slate-800" : "border-gray-50")}>
                             <div className="flex items-center gap-3">
-                                <div className={clsx("w-1 h-8 rounded-full", item.type === 'Income' ? "bg-emerald-400" : "bg-indigo-400")}></div>
+                                <div className={clsx("w-1 h-8 rounded-full", item.type === 'Income' ? "bg-emerald-400" : accent.expenseBar)}></div>
                                 <div>
                                     <div className={clsx("font-bold text-sm", textColor)}>{item.name}</div>
                                     <div className="text-xs text-gray-400">毎月 {item.day}日 / {item.category}</div>
@@ -432,8 +435,9 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
                         className={clsx(
                             "mt-6 w-full py-3 border-2 border-dashed rounded-xl text-sm font-bold transition-colors flex justify-center items-center gap-2",
                             isDarkMode
-                                ? "border-slate-700 text-gray-500 hover:text-indigo-400 hover:border-indigo-900 hover:bg-slate-800"
-                                : "border-gray-200 text-gray-400 hover:bg-gray-50 hover:border-indigo-200 hover:text-indigo-400"
+                                ? "border-slate-700 text-gray-500 hover:bg-slate-800"
+                                : "border-gray-200 text-gray-400 hover:bg-gray-50",
+                            pickMode(accent.addButtonHover, isDarkMode)
                         )}
                     >
                         <PlusCircle size={16} /> 新しい定期設定を追加
@@ -443,7 +447,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
 
             {/* Add Form Modal/Inline */}
             {showForm && (
-                <div className={clsx("p-5 rounded-2xl shadow-lg border animate-in fade-in slide-in-from-bottom-2", isDarkMode ? "bg-slate-900 border-indigo-900" : "bg-white border-indigo-100")}>
+                <div className={clsx("p-5 rounded-2xl shadow-lg border animate-in fade-in slide-in-from-bottom-2", isDarkMode ? "bg-slate-900" : "bg-white", pickMode(accent.panelBorder, isDarkMode))}>
                     <h3 className={clsx("font-bold mb-4 text-sm", textColor)}>定期設定の追加</h3>
 
                     <div className="space-y-4">
@@ -518,7 +522,7 @@ function FixedCostSection({ categories, source, isDarkMode }: { categories: Cate
                             <button
                                 onClick={handleAdd}
                                 disabled={isAdding}
-                                className="flex-[2] bg-indigo-600 text-white font-bold py-3 rounded-xl shadow-md text-sm"
+                                className={clsx("flex-[2] text-white font-bold py-3 rounded-xl shadow-md text-sm", accent.solidButton)}
                             >
                                 {isAdding ? '保存中...' : '設定を保存'}
                             </button>

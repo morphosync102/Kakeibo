@@ -11,16 +11,20 @@ import BottomNav from '@/components/BottomNav';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import { Expense } from '@/lib/api';
 import { EXPENSE_CATEGORIES as CATEGORIES } from '@/lib/categories';
+import { getSource, type SourceId } from '@/lib/sources';
+import { ACCENT_CLASSES, pickMode } from '@/lib/theme';
 
 // Lovely color palette for finance categories
 const COLORS = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#14b8a6'];
 
 interface DashboardProps {
-    source?: string;
-    isDarkMode?: boolean;
+    source: SourceId;
 }
 
-export default function Dashboard({ source, isDarkMode = false }: DashboardProps) {
+export default function Dashboard({ source }: DashboardProps) {
+    const sourceInfo = getSource(source);
+    const isDarkMode = sourceInfo.theme.dark;
+    const accent = ACCENT_CLASSES[sourceInfo.theme.accent];
     const { expenses, loading, error, refresh, removeLocal, updateLocal } = useExpenses(source);
     const currentMonth = format(new Date(), 'yyyy/MM');
     const [selectedMonth, setSelectedMonth] = useState<string>(currentMonth);
@@ -33,8 +37,8 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
     // Theme-based colors
-    const bgColor = isDarkMode ? 'bg-slate-950' : 'bg-gray-50';
-    const cardBgColor = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-gray-100';
+    const bgColor = pickMode(accent.pageBg, isDarkMode);
+    const cardBgColor = pickMode(accent.card, isDarkMode);
     const textColor = isDarkMode ? 'text-gray-100' : 'text-gray-800';
     const subTextColor = isDarkMode ? 'text-gray-400' : 'text-gray-500';
     const headerBg = isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-white border-b';
@@ -167,7 +171,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
             {/* Header */}
             <header className={clsx("px-6 py-4 sticky top-0 z-10 flex justify-between items-center shadow-sm safe-area-top transition-colors", headerBg)}>
                 <h1 className={clsx("text-xl font-bold", textColor)}>
-                    {source === 'yahoo' ? '個人kakeibo' : 'My kakeibo'}
+                    {sourceInfo.dashboardTitle}
                 </h1>
                 <button
                     onClick={refresh}
@@ -203,10 +207,10 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                                 <div className={clsx(
                                     "rounded-2xl p-6 text-white shadow-lg transition-transform duration-300 relative overflow-hidden",
                                     isCurrent ? "scale-100 opacity-100 ring-2 ring-offset-2" : "scale-95 opacity-80",
-                                    isCurrent && isDarkMode ? "ring-indigo-900" : "ring-indigo-300",
+                                    pickMode(accent.monthCardRing, isCurrent && isDarkMode),
                                     // Card Colors
                                     isRealCurrentMonth
-                                        ? (isDarkMode ? "bg-gradient-to-br from-indigo-900 to-indigo-950" : "bg-gradient-to-br from-indigo-600 to-indigo-800")
+                                        ? pickMode(accent.monthCardCurrent, isDarkMode)
                                         : (isDarkMode ? "bg-gradient-to-br from-slate-700 to-slate-800" : "bg-gradient-to-br from-slate-500 to-slate-700")
                                 )}>
                                     <div className="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-2xl pointer-events-none" />
@@ -249,7 +253,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                             key={m}
                             className={clsx(
                                 "w-1.5 h-1.5 rounded-full transition-colors",
-                                m === selectedMonth ? "bg-indigo-500" : (isDarkMode ? "bg-slate-700" : "bg-gray-300")
+                                m === selectedMonth ? accent.dotActive : (isDarkMode ? "bg-slate-700" : "bg-gray-300")
                             )}
                         />
                     ))}
@@ -312,8 +316,8 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                             className={clsx(
                                 "p-3 rounded-xl shadow-sm border flex items-center justify-between transition-all",
                                 selectedCategory === item.name
-                                    ? (isDarkMode ? "bg-indigo-900/30 border-indigo-500 ring-1 ring-indigo-500" : "bg-indigo-50 border-indigo-500 ring-1 ring-indigo-500")
-                                    : (isDarkMode ? "bg-slate-900 border-slate-800 hover:bg-slate-800" : "bg-white border-gray-100 hover:bg-gray-50"),
+                                    ? pickMode(accent.categorySelected, isDarkMode)
+                                    : clsx(cardBgColor, isDarkMode ? "hover:bg-slate-800" : "hover:bg-gray-50"),
                                 selectedCategory && selectedCategory !== item.name && "opacity-50"
                             )}
                         >
@@ -338,7 +342,7 @@ export default function Dashboard({ source, isDarkMode = false }: DashboardProps
                     {selectedCategory && (
                         <button
                             onClick={() => updateSelectedCategory(null)}
-                            className="text-xs text-indigo-500 hover:underline"
+                            className={clsx("text-xs hover:underline", accent.linkText)}
                         >
                             解除
                         </button>

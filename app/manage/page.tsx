@@ -6,7 +6,7 @@ import { Suspense } from 'react';
 export default function ManagePage() {
     return (
         <Suspense fallback={<div>Loading...</div>}>
-            <ManageView />
+            <ManageView source="main" />
         </Suspense>
     );
 }

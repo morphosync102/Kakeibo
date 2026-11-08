@@ -1,11 +1,17 @@
 // Pure helpers for the /api/expenses proxy (app/api/expenses/route.ts).
 // Keep free of `@/` and Next imports so node --test can load it directly.
 
-// An omitted source (missing query param / body field) means 'main'. Anything
-// else, including '' and case variants such as 'Yahoo', is rejected so a bug
-// can never route personal data into the household sheets.
+// The registry ids (lib/sources.ts SOURCE_IDS; kept as a literal list because
+// this file must load without imports, test/sources-theme.test.mjs checks they
+// match). Access to a source is decided by the session and GAS, not here.
+const ALLOWED_SOURCES: readonly string[] = ['main', 'yahoo', 'yuki'];
+
+// An omitted source (missing query param / body field) means 'main' for old
+// clients; current clients always send it. Anything else, including '' and
+// case variants such as 'Yahoo', is rejected so a bug can never route one
+// kakeibo's data into another's sheets.
 export function isAllowedSource(source: unknown): boolean {
-    return source === undefined || source === null || source === 'main' || source === 'yahoo';
+    return source === undefined || source === null || (typeof source === 'string' && ALLOWED_SOURCES.includes(source));
 }
 
 // GAS answers both list endpoints (expenses and getFixedCosts) with a JSON

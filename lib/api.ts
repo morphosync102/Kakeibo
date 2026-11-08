@@ -1,3 +1,5 @@
+import type { SourceId } from './sources';
+
 export interface Expense {
   id?: string; // MessageId (shared by rows from the same email)
   rowId?: string; // RowId (column H): unique per row; absent until backfilled
@@ -11,15 +13,13 @@ export interface Expense {
 // Call our own Next.js API route (proxy) instead of GAS directly
 const API_URL = '/api/expenses';
 
+// source is required and always sent (main included): no fallback to main.
 // fresh: bypass the proxy's server cache (refetch after a write or a manual
 // refresh), so a list cached by a read that raced the write is not served.
-export async function fetchExpenses(source?: string, { fresh = false }: { fresh?: boolean } = {}): Promise<Expense[]> {
-  const params = new URLSearchParams();
-  if (source) params.set('source', source);
+export async function fetchExpenses(source: SourceId, { fresh = false }: { fresh?: boolean } = {}): Promise<Expense[]> {
+  const params = new URLSearchParams({ source });
   if (fresh) params.set('fresh', '1');
-  const query = params.toString();
-  const url = query ? `${API_URL}?${query}` : API_URL;
-  const res = await fetch(url);
+  const res = await fetch(`${API_URL}?${params.toString()}`);
   if (!res.ok) {
     throw new Error(`Failed to fetch data (${res.status})`);
   }
