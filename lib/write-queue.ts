@@ -9,7 +9,7 @@
 // Keep this module free of `@/` imports: tests load it directly with Node's
 // TypeScript type stripping (relative imports carry the .ts extension).
 
-import { handleSessionExpired } from './client-session.ts';
+import { handleUnauthorized, unauthorizedError } from './client-session.ts';
 
 type PendingListener = (pending: number) => void;
 
@@ -132,10 +132,15 @@ export function postWrite(
                 signal: AbortSignal.timeout(timeoutMs),
             });
             // Invalid, expired or revoked session: nothing was written. Clear
-            // the cached lists and go to /login.
+            // the cached lists and go to /login. App lock (401 Locked): also
+            // nothing written; the cache stays and the lock screen opens. An
+            // active screen is not refused (lib/app-lock.ts: the server window
+            // outlasts the client's), and the guard locks only after the
+            // queue has drained (components/AppLockGuard.tsx).
             if (res.status === 401) {
-                handleSessionExpired();
-                throw new Error('Unauthorized');
+                const error = await unauthorizedError(res);
+                handleUnauthorized(error);
+                throw new Error(error === 'Locked' ? 'Locked' : 'Unauthorized');
             }
             data = await res.json() as WriteResult;
         } catch (e) {

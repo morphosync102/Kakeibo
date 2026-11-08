@@ -1,13 +1,14 @@
 'use client';
 
-import { useState, useEffect, FormEvent, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { browserSupportsWebAuthn, startAuthentication } from "@simplewebauthn/browser";
 import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import { browserStorage, clearKakeiboStorage, rememberLoginUser } from "@/lib/client-session";
+import { markAppActive } from "@/lib/app-lock";
 import {
-    apiErrorMessage, ceremonyFailureMessage, createAutoStartGate, isFresh, isInAppBrowser, isLoggedOutLanding,
-    postAuthJson, safeRedirect, shouldAutoStartPasskey,
+    apiErrorMessage, ceremonyFailureMessage, createAutoStartGate, isFresh, isInAppBrowser, isLockedLanding, isLoggedOutLanding,
+    LOCKED_NOTICE, postAuthJson, safeRedirect, shouldAutoStartPasskey,
 } from "@/lib/passkey-client";
 
 type CachedOptions = { options: PublicKeyCredentialRequestOptionsJSON; fetchedAt: number };
@@ -18,8 +19,9 @@ async function fetchLoginOptions(): Promise<CachedOptions | null> {
     return { options: result.data.options as PublicKeyCredentialRequestOptionsJSON, fetchedAt: Date.now() };
 }
 
-export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolean }) {
-    const [input, setInput] = useState("");
+// Passkey login only (the shared password was removed, design §11 U6). Also
+// the app lock screen (?reason=locked, §3.12): same flow, the cache is kept.
+export default function LoginForm() {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [passkeySupported, setPasskeySupported] = useState(true);
@@ -31,10 +33,12 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
     const searchParams = useSearchParams();
     const returnTo = searchParams.get('returnTo');
     const sessionEnded = searchParams.get('reason') === 'session';
+    const locked = isLockedLanding(searchParams);
     const loggedOut = isLoggedOutLanding(searchParams);
 
     // Sent here because the session was invalid, expired or revoked: remove
-    // every cached list before anything else can show it (design §3.8)
+    // every cached list before anything else can show it (design §3.8).
+    // A lock (reason=locked) keeps them: same user, same session.
     useEffect(() => {
         if (sessionEnded) clearKakeiboStorage();
     }, [sessionEnded]);
@@ -58,10 +62,13 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
         return () => { cancelled = true; };
     }, []);
 
-    // Successful login (either way): clear the cache if the user changed,
-    // then a full navigation so no screen of the previous session survives.
+    // Successful login: clear the cache if the user changed, restart the app
+    // lock's idle clock, then a full navigation so no screen of the previous
+    // session survives.
     const finishLogin = useCallback((data: Record<string, unknown>) => {
-        if (typeof data.userId === 'string') rememberLoginUser(browserStorage(), data.userId);
+        const storage = browserStorage();
+        if (typeof data.userId === 'string') rememberLoginUser(storage, data.userId);
+        markAppActive(storage);
         window.location.assign(safeRedirect(data.redirectTo));
     }, []);
 
@@ -105,69 +112,19 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
     }, [returnTo, finishLogin, refetchOptions]);
 
     // Start Face ID by itself once the challenge is ready (at most once per
-    // page; never right after a logout, in an in-app browser or while the
-    // password is being typed)
+    // page; never right after a logout or in an in-app browser)
     useEffect(() => {
         const allowed = shouldAutoStartPasskey({
             optionsReady,
             supported: passkeySupported,
             inAppBrowser,
             loggedOut,
-            typingPassword: input.length > 0,
         });
         if (autoStart.current.tryStart(allowed)) {
             // eslint-disable-next-line react-hooks/set-state-in-effect -- starts an async ceremony once
             void loginWithPasskey({ auto: true });
         }
-    }, [optionsReady, passkeySupported, inAppBrowser, loggedOut, input, loginWithPasskey]);
-
-    const performLogin = useCallback(async (password: string) => {
-        setIsLoading(true);
-        setError(null);
-
-        try {
-            // returnTo is validated by the server (same-origin path of a
-            // kakeibo this user may open); redirectTo is the result
-            const res = await fetch("/api/auth/verify", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ password, returnTo }),
-            });
-
-            if (res.ok) {
-                finishLogin(await res.json() as Record<string, unknown>);
-                return;
-            } else {
-                setError(res.status === 404
-                    ? 'パスワードでのログインは終了しました'
-                    : res.status === 401 ? 'Incorrect password' : 'ログインできませんでした。時間をおいて再度お試しください');
-                // Clearing the input also stops the autofill auto-submit loop
-                setInput("");
-            }
-        } catch {
-            setError('ログインできませんでした。時間をおいて再度お試しください');
-        }
-        setIsLoading(false);
-    }, [returnTo, finishLogin]);
-
-    const handleLogin = (e: FormEvent) => {
-        e.preventDefault();
-        performLogin(input);
-    };
-
-    // Auto-submit when input is populated (Autofill detection)
-    useEffect(() => {
-        if (!passwordEnabled || !input) return;
-
-        // Debounce to wait for autofill or end of typing
-        const timer = setTimeout(() => {
-            if (input.length > 3 && !isLoading) { // Assume min password length 4
-                performLogin(input);
-            }
-        }, 800);
-
-        return () => clearTimeout(timer);
-    }, [input, isLoading, performLogin, passwordEnabled]);
+    }, [optionsReady, passkeySupported, inAppBrowser, loggedOut, loginWithPasskey]);
 
     return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-4">
@@ -180,6 +137,7 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
                     </div>
                     <h1 className="text-2xl font-bold text-gray-800">Kakeibo Secured</h1>
                     <p className="text-gray-500 text-sm mt-1">Face ID などのパスキーでログインします</p>
+                    {locked && <p className="text-gray-600 text-xs mt-3">{LOCKED_NOTICE}</p>}
                 </div>
 
                 <button
@@ -193,35 +151,7 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
                 {!passkeySupported && <p className="text-gray-500 text-xs mt-2 ml-1">このブラウザはパスキーに対応していません</p>}
                 {autoFailed && !error && !isLoading && <p className="text-gray-400 text-xs mt-2 ml-1">ボタンを押すと顔認証が始まります</p>}
                 {error && <p className="text-red-500 text-xs mt-2 ml-1" role="alert">{error}</p>}
-
-                {passwordEnabled && (
-                    <form onSubmit={handleLogin} className="space-y-6 mt-8 pt-6 border-t border-gray-100">
-                        <p className="text-gray-500 text-xs text-center">移行期間中はパスワードでもログインできます</p>
-                        <div>
-                            <input
-                                type="password"
-                                name="password"
-                                autoComplete="current-password"
-                                value={input}
-                                onChange={(e) => {
-                                    setInput(e.target.value);
-                                    setError(null);
-                                }}
-                                className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition-all text-gray-800 placeholder-gray-400"
-                                placeholder="Password"
-                                disabled={isLoading}
-                            />
-                        </div>
-
-                        <button
-                            type="submit"
-                            disabled={isLoading}
-                            className={`w-full bg-white border border-gray-300 text-gray-700 py-3 rounded-xl font-semibold transition-all ${isLoading ? "opacity-70 cursor-not-allowed" : "active:scale-95"}`}
-                        >
-                            {isLoading ? "Verifying..." : "パスワードでログイン"}
-                        </button>
-                    </form>
-                )}
+                <p className="text-gray-400 text-xs mt-6 text-center">パスキーを使えなくなったときは、管理者に復旧用の招待リンクを依頼してください</p>
             </div>
         </div>
     );

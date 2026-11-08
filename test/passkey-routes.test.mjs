@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import test from 'node:test';
 import { createSession, readSession } from '../lib/session.ts';
 import { createChallengeToken, newChallenge, readChallengeToken } from '../lib/webauthn-challenge.ts';
 import { loadRoute } from './helpers/load-route.mjs';
 import { createSoftPasskey } from './helpers/soft-authenticator.mjs';
+import { ACTIVE_TTL_SECONDS, isActiveTokenValid } from '../lib/active-session.ts';
+import { legacyPasswordSession } from './helpers/legacy-session.mjs';
 import { createFakeGas, sha256 } from './helpers/fake-gas-auth.mjs';
 
 // Passkey routes driven by a software authenticator (real ES256 signatures and
@@ -16,6 +18,7 @@ const DUMMY_KEY = 'dummy-gas-proxy-secret';
 const DUMMY_AUTH_KEY = 'dummy-gas-auth-proxy-secret';
 const RP_ID = 'kakeibo.example';
 const ORIGIN = 'https://kakeibo.example';
+// APP_PASSWORD may stay on Vercel (the user keeps it): it must change nothing
 const ENV = {
     SESSION_SECRET: secret, APP_PASSWORD: password, GAS_PROXY_SECRET: DUMMY_KEY, GAS_AUTH_PROXY_SECRET: DUMMY_AUTH_KEY,
     NODE_ENV: 'production', WEBAUTHN_RP_ID: RP_ID, WEBAUTHN_ORIGIN: ORIGIN,
@@ -111,12 +114,17 @@ test('invite registration: options from authPeekInvite (hash only), then a verif
         key: DUMMY_KEY, authKey: DUMMY_AUTH_KEY,
     }]);
     assert.equal(gas.state.invites.get(sha256(INVITE)).used, true);
+    // unlocked from the start: the app lock's active cookie for this session
+    const active = ver.cookies.get('kakeibo_active');
+    assert.ok(await isActiveTokenValid(active.value, secret, { userId: YUKI.userId, epoch: 0 }));
+    for (const attr of [/HttpOnly/i, /Secure/i, /SameSite=strict/i, /Path=\//i, new RegExp(`Max-Age=${ACTIVE_TTL_SECONDS}`)]) assert.match(active.attrs, attr);
 
     // the same invite again: consumed (one-time), no session
     const again = await call('register/verify', { body: { token: INVITE, response }, challenge: cookie.value, gas });
     assert.equal(again.status, 410);
     assert.equal(again.json.error, 'InviteInvalid');
     assert.equal(again.sessionCookie, undefined);
+    assert.equal(again.cookies.get('kakeibo_active'), undefined);
 });
 
 test('register/verify rejects a missing, foreign, expired or wrong-purpose challenge and bad responses before GAS', async () => {
@@ -181,7 +189,7 @@ test('register/options: invalid invites, GAS failures and the Host header', asyn
 test('every passkey route fails closed (503, no GAS, no cookie) without WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN / SESSION_SECRET', async () => {
     const session = await sessionOf(ADMIN);
     for (const env of [{ WEBAUTHN_RP_ID: undefined }, { WEBAUTHN_ORIGIN: undefined }, { WEBAUTHN_ORIGIN: 'http://kakeibo.example' }, { SESSION_SECRET: undefined }]) {
-        for (const path of ['register/options', 'register/verify', 'login/options', 'login/verify', 'passkeys/add/options', 'passkeys/add/reauth', 'passkeys/add/bootstrap', 'passkeys/add/verify']) {
+        for (const path of ['register/options', 'register/verify', 'login/options', 'login/verify', 'passkeys/add/options', 'passkeys/add/reauth', 'passkeys/add/verify']) {
             const res = await call(path, { body: { token: INVITE, password }, session, env });
             assert.equal(res.status, 503, `${path} ${JSON.stringify(env)}`);
             assert.deepEqual(res.actions, [], path);
@@ -222,8 +230,9 @@ test('passkey login: no GAS for options, then authGetCredential -> verify -> aut
     ]);
     assert.ok(ver.bodies.every(b => b.authKey === DUMMY_AUTH_KEY && b.key === DUMMY_KEY));
     assert.equal(gas.state.credentials.get(pk.id).counter, 6);
-    // a session cookie survives APP_PASSWORD removal (amr=pk)
-    assert.ok(await readSession(ver.sessionCookie, { SESSION_SECRET: secret }));
+    // the login also unlocks the app lock (active cookie bound to this session's user and epoch)
+    assert.ok(await isActiveTokenValid(ver.cookies.get('kakeibo_active').value, secret, { userId: ADMIN.userId, epoch: 2 }));
+    assert.equal(await isActiveTokenValid(ver.cookies.get('kakeibo_active').value, secret, { userId: ADMIN.userId, epoch: 3 }), false);
 });
 
 test('a used challenge is refused (ChallengeReused): replaying the same assertion and cookie gives no session', async () => {
@@ -238,6 +247,7 @@ test('a used challenge is refused (ChallengeReused): replaying the same assertio
     assert.equal(replay.status, 400);
     assert.equal(replay.json.error, 'ChallengeInvalid');
     assert.equal(replay.sessionCookie, undefined);
+    assert.equal(replay.cookies.get('kakeibo_active'), undefined, 'a refused login does not unlock');
     assert.ok(deleted(replay));
 });
 
@@ -381,15 +391,15 @@ test('adding a passkey: re-authentication with an existing passkey, then a NEW c
     assert.equal((await readSession(ver.sessionCookie, ENV)).amr, 'pk');
 });
 
-test('a password session that re-authenticates with a passkey becomes a passkey session', async () => {
+test('a password session of the migration period can no longer re-authenticate to upgrade itself (401, cookie deleted)', async () => {
     const pk1 = createSoftPasskey({ rpID: RP_ID, userId: ADMIN.userId });
     const gas = world({ credentials: [stored(pk1)] });
-    const session = await sessionOf(ADMIN, 'pwd');
-    const { reauth } = await reauthFlow({ gas, session, pk: pk1, user: ADMIN });
-    const pk2 = createSoftPasskey({ rpID: RP_ID, userId: ADMIN.userId });
-    const ver = await call('passkeys/add/verify', { body: { response: pk2.register({ challenge: reauth.json.options.challenge, origin: ORIGIN }) }, session, challenge: reauth.challengeCookie, gas });
-    assert.equal(ver.status, 200);
-    assert.deepEqual(await readSession(ver.sessionCookie, { SESSION_SECRET: secret }), { userId: ADMIN.userId, epoch: 2, sources: ['main', 'yahoo'], homeSource: 'main', amr: 'pk' });
+    const session = legacyPasswordSession(secret, ADMIN);
+    const opt = await call('passkeys/add/options', { session, gas });
+    assert.equal(opt.status, 401);
+    assert.equal(opt.json.error, 'Unauthorized');
+    assert.ok(deleted(opt, 'kakeibo_session'));
+    assert.deepEqual(opt.actions, []);
 });
 
 test('re-authentication with another user\'s passkey is refused, even with a valid signature', async () => {
@@ -441,11 +451,10 @@ test('no passkey is added without the re-authentication challenge (reauth / logi
 });
 
 test('the passkey add routes need a valid session (401, no GAS)', async () => {
-    for (const path of ['passkeys/add/options', 'passkeys/add/reauth', 'passkeys/add/bootstrap', 'passkeys/add/verify']) {
-        for (const session of [undefined, 'forged', await sessionOf(ADMIN, 'pwd')]) {
-            const env = session && session !== 'forged' ? { APP_PASSWORD: undefined } : {};
-            const res = await call(path, { body: { password }, session, env });
-            assert.ok(res.status === 401 || (path === 'passkeys/add/bootstrap' && res.status === 404), `${path} ${String(session).slice(0, 8)}`);
+    for (const path of ['passkeys/add/options', 'passkeys/add/reauth', 'passkeys/add/verify']) {
+        for (const session of [undefined, 'forged', legacyPasswordSession(secret, ADMIN)]) {
+            const res = await call(path, { body: { password }, session });
+            assert.equal(res.status, 401, `${path} ${String(session).slice(0, 8)}`);
             assert.deepEqual(res.actions, [], path);
         }
     }
@@ -461,76 +470,45 @@ test('a revoked session (GAS SessionRevoked) gets 401 and its cookie deleted', a
     assert.ok(deleted(res, 'kakeibo_session'));
 });
 
-// ---------------------------------------------------------------- bootstrap
+// ---------------------------------------------------------------- no password bootstrap (U6)
 
-test('bootstrap: the admin without passkeys re-enters APP_PASSWORD; the add is flagged bootstrap and the session stays as it was', async () => {
-    const gas = world();
-    const session = await sessionOf(ADMIN, 'pwd');
-    const opt = await call('passkeys/add/options', { session, gas });
-    assert.deepEqual(opt.json, { mode: 'bootstrap' });
-    assert.equal(opt.challengeCookie, undefined);
+// A purpose=bootstrap challenge cookie as the removed route signed it (same
+// derived key and format), to check nothing accepts it any more
+function legacyBootstrapCookie(challenge, binding) {
+    const issued = Math.floor(Date.now() / 1000);
+    const payload = ['wa1', 'bootstrap', issued, issued + 300, challenge, binding].join('.');
+    const key = createHmac('sha256', Buffer.from(secret, 'hex')).update('kakeibo/webauthn-challenge/v1').digest();
+    return `${payload}.${createHmac('sha256', key).update(payload).digest('hex')}`;
+}
 
-    const wrong = await call('passkeys/add/bootstrap', { body: { password: `${password}x` }, session, gas });
-    assert.equal(wrong.status, 401);
-    assert.equal(wrong.json.error, 'Incorrect password');
-    assert.deepEqual(wrong.actions, []);
-    assert.equal(wrong.challengeCookie, undefined);
-
-    const boot = await call('passkeys/add/bootstrap', { body: { password }, session, gas });
-    assert.equal(boot.status, 200);
-    assert.deepEqual(boot.actions, ['authListCredentials']);
-    assert.deepEqual(boot.json.options.excludeCredentials, []);
-    assert.equal(boot.json.options.user.id, b64u(ADMIN.userId));
-    assert.ok(await readChallengeToken(boot.challengeCookie, secret, { purposes: ['bootstrap'], binding: ADMIN.userId }));
-    assert.ok(JSON.stringify(boot.bodies).indexOf(password) === -1, 'the password never goes to GAS');
-
-    const pk = createSoftPasskey({ rpID: RP_ID, userId: ADMIN.userId });
-    const ver = await call('passkeys/add/verify', { body: { response: pk.register({ challenge: boot.json.options.challenge, origin: ORIGIN }) }, session, challenge: boot.challengeCookie, gas });
-    assert.equal(ver.status, 200);
-    assert.deepEqual(ver.json, { success: true, credentialCount: 1 });
-    assert.equal(ver.bodies[0].bootstrap, true);
-    assert.equal(ver.sessionCookie, undefined, 'a bootstrap does not upgrade the session');
-
-    // from now on: re-authentication with the passkey, never the password
-    const again = await call('passkeys/add/bootstrap', { body: { password }, session, gas });
-    assert.equal(again.status, 403);
-    assert.equal(again.json.error, 'NotAllowed');
-    assert.equal(again.challengeCookie, undefined);
-    assert.equal((await call('passkeys/add/options', { session, gas })).json.mode, 'reauth');
+test('no passkey, no add: options answer 403 NotAllowed (no password mode), whatever APP_PASSWORD is', async () => {
+    for (const env of [{}, { APP_PASSWORD: undefined }]) {
+        const gas = world();
+        const opt = await call('passkeys/add/options', { session: await sessionOf(ADMIN), gas, env });
+        assert.equal(opt.status, 403);
+        assert.deepEqual(opt.json, { error: 'NotAllowed' });
+        assert.equal(opt.challengeCookie, undefined);
+        assert.deepEqual(opt.actions, ['authListCredentials']);
+    }
 });
 
-test('bootstrap is refused for members (GAS), after APP_PASSWORD is removed, and its challenge is not a passkey re-authentication', async () => {
-    // a member without passkeys: Next.js lets the password through, GAS refuses the bootstrap
+test('an old bootstrap challenge cookie is refused everywhere (ChallengeInvalid, no GAS, never bootstrap: true)', async () => {
     const gas = world();
-    const yukiSession = await sessionOf(YUKI, 'pwd');
-    const boot = await call('passkeys/add/bootstrap', { body: { password }, session: yukiSession, gas });
-    assert.equal(boot.status, 200);
-    const pk = createSoftPasskey({ rpID: RP_ID, userId: YUKI.userId });
-    const ver = await call('passkeys/add/verify', { body: { response: pk.register({ challenge: boot.json.options.challenge, origin: ORIGIN }) }, session: yukiSession, challenge: boot.challengeCookie, gas });
-    assert.equal(ver.status, 403);
-    assert.equal(ver.json.error, 'NotAllowed');
-    assert.equal(gas.state.credentials.size, 0);
-
-    // without APP_PASSWORD there is no bootstrap
-    const noPassword = { APP_PASSWORD: undefined };
-    const pkSession = await sessionOf(ADMIN, 'pk');
-    const options = await call('passkeys/add/options', { session: pkSession, gas, env: noPassword });
-    assert.equal(options.status, 403);
-    assert.equal(options.json.error, 'NotAllowed');
-    const route = await call('passkeys/add/bootstrap', { body: { password }, session: pkSession, gas, env: noPassword });
-    assert.equal(route.status, 404);
-    assert.deepEqual(route.actions, []);
+    const session = await sessionOf(ADMIN);
     const challenge = newChallenge();
-    const lateCookie = await createChallengeToken(secret, { purpose: 'bootstrap', challenge, binding: ADMIN.userId });
+    const cookie = legacyBootstrapCookie(challenge, ADMIN.userId);
+    assert.equal(await readChallengeToken(cookie, secret, { purposes: ['add', 'reauth'], binding: ADMIN.userId }), null);
     const adminPk = createSoftPasskey({ rpID: RP_ID, userId: ADMIN.userId });
-    const late = await call('passkeys/add/verify', { body: { response: adminPk.register({ challenge, origin: ORIGIN }) }, session: pkSession, challenge: lateCookie, gas, env: noPassword });
-    assert.equal(late.status, 403);
-    assert.deepEqual(late.actions, []);
-
-    // the bootstrap challenge cannot stand in for a passkey re-authentication
-    const reauth = await call('passkeys/add/reauth', { body: { response: adminPk.assert({ challenge, origin: ORIGIN }) }, session: pkSession, challenge: lateCookie, gas });
+    const ver = await call('passkeys/add/verify', { body: { response: adminPk.register({ challenge, origin: ORIGIN }) }, session, challenge: cookie, gas });
+    assert.equal(ver.status, 400);
+    assert.equal(ver.json.error, 'ChallengeInvalid');
+    assert.deepEqual(ver.actions, []);
+    assert.ok(deleted(ver));
+    const reauth = await call('passkeys/add/reauth', { body: { response: adminPk.assert({ challenge, origin: ORIGIN }) }, session, challenge: cookie, gas });
     assert.equal(reauth.status, 400);
     assert.equal(reauth.json.error, 'ChallengeInvalid');
+    assert.equal(gas.state.credentials.size, 0);
+    assert.ok(gas.state.bodies.every(b => b.bootstrap === undefined));
 });
 
 test('responses and logs never carry challenges, tokens, passwords or GAS secrets', async () => {
@@ -543,7 +521,7 @@ test('responses and logs never carry challenges, tokens, passwords or GAS secret
     const { challenge, cookie } = await loginOptions(gas);
     results.push(await call('login/verify', { body: { response: pk.assert({ challenge, origin: ORIGIN }) }, challenge: cookie, gas }));
     results.push(await call('register/options', { body: { token: INVITE }, gas }));
-    results.push(await call('passkeys/add/bootstrap', { body: { password }, session: await sessionOf(ADMIN, 'pwd'), gas }));
+    results.push(await call('passkeys/add/options', { body: { password }, session: await sessionOf(ADMIN), gas }));
     for (const res of results) {
         assert.equal(res.status, 503);
         assert.deepEqual(res.json, { error: 'Service Unavailable' });

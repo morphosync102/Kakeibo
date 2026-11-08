@@ -4,13 +4,19 @@ import { useEffect, useRef, useState } from "react";
 import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/browser";
 import type { PublicKeyCredentialCreationOptionsJSON } from "@simplewebauthn/browser";
 import { browserStorage, rememberLoginUser } from "@/lib/client-session";
-import { apiErrorMessage, ceremonyErrorMessage, inviteTokenFromHash, isFresh, isInAppBrowser, postAuthJson, safeRedirect } from "@/lib/passkey-client";
+import { markAppActive } from "@/lib/app-lock";
+import {
+    apiErrorMessage, ceremonyErrorMessage, INVITE_IN_APP_BROWSER_NOTICE, INVITE_MISSING_TOKEN_MESSAGE, inviteTokenFromHash,
+    isFresh, isInAppBrowser, postAuthJson, safeRedirect, shouldClearInviteFragment,
+} from "@/lib/passkey-client";
 
 // Passkey registration from an invite link /invite#<token> (design §3.3,
 // §3.11). The token stays in the URL fragment (never sent to the server as
 // a URL, so it is not in access logs or Referer) and is removed from the
-// address bar at once. Only the server-side routes see it, in a POST body,
-// and pass only its SHA-256 to GAS.
+// address bar at once, except in an in-app browser (LINE etc.), where "Open
+// in Safari" hands over the current URL and needs it; it is then removed
+// after the registration. Only the server-side routes see it, in a POST
+// body, and pass only its SHA-256 to GAS.
 
 type Phase = 'loading' | 'invalid' | 'unsupported' | 'ready' | 'registering' | 'done';
 type CachedOptions = { options: PublicKeyCredentialCreationOptionsJSON; fetchedAt: number };
@@ -39,15 +45,16 @@ export default function InvitePage() {
 
     useEffect(() => {
         const token = inviteTokenFromHash(window.location.hash);
-        // Remove the token from the address bar and history
-        window.history.replaceState(null, '', '/invite');
+        // Remove the token from the address bar and history, except in an
+        // in-app browser: "Open in Safari" needs it in the URL
+        if (shouldClearInviteFragment(navigator.userAgent)) window.history.replaceState(null, '', '/invite');
         tokenRef.current = token;
         // The fragment and browser capabilities are only known on the client
         // eslint-disable-next-line react-hooks/set-state-in-effect -- read once on arrival
         setInAppBrowser(isInAppBrowser(navigator.userAgent));
         if (!token) {
             setPhase('invalid');
-            setError('招待リンクが正しくありません。届いたリンクをそのまま開いてください');
+            setError(INVITE_MISSING_TOKEN_MESSAGE);
             return;
         }
         if (!browserSupportsWebAuthn()) {
@@ -85,8 +92,13 @@ export default function InvitePage() {
             return;
         }
         tokenRef.current = null;
-        // A new user on this device: clear the previous user's cache
-        if (typeof result.data.userId === 'string') rememberLoginUser(browserStorage(), result.data.userId);
+        // The invite is consumed: drop the token from the URL in every browser
+        window.history.replaceState(null, '', '/invite');
+        // A new user on this device: clear the previous user's cache; the
+        // app lock's idle clock starts now (§3.12)
+        const storage = browserStorage();
+        if (typeof result.data.userId === 'string') rememberLoginUser(storage, result.data.userId);
+        markAppActive(storage);
         setRedirectTo(safeRedirect(result.data.redirectTo));
         setPhase('done');
     };
@@ -98,7 +110,7 @@ export default function InvitePage() {
 
                 {inAppBrowser && phase !== 'done' && (
                     <p className="text-amber-700 bg-amber-50 rounded-lg p-3 text-sm">
-                        LINE などのアプリ内ブラウザでは登録できないことがあります。右下(または右上)のメニューから「Safariで開く」を選んでください。
+                        {INVITE_IN_APP_BROWSER_NOTICE}
                     </p>
                 )}
 

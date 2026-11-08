@@ -1,5 +1,5 @@
 import type { SourceId } from './sources';
-import { handleSessionExpired } from './client-session.ts';
+import { handleUnauthorized, unauthorizedError } from './client-session.ts';
 
 export interface Expense {
   id?: string; // MessageId (shared by rows from the same email)
@@ -21,8 +21,9 @@ export async function fetchExpenses(source: SourceId, { fresh = false }: { fresh
   const params = new URLSearchParams({ source });
   if (fresh) params.set('fresh', '1');
   const res = await fetch(`${API_URL}?${params.toString()}`);
-  // Invalid, expired or revoked session: clear the cached lists, go to /login
-  if (res.status === 401) handleSessionExpired();
+  // Invalid, expired or revoked session: clear the cached lists, go to /login.
+  // App lock (401 Locked): keep them and open the lock screen.
+  if (res.status === 401) handleUnauthorized(await unauthorizedError(res));
   if (!res.ok) {
     throw new Error(`Failed to fetch data (${res.status})`);
   }

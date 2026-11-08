@@ -22,7 +22,7 @@ test('a challenge token round-trips purpose, challenge and binding', async () =>
     const challenge = newChallenge();
     assert.match(challenge, /^[A-Za-z0-9_-]{43}$/);
     assert.notEqual(newChallenge(), challenge);
-    for (const [purpose, binding] of [['register', HASH], ['login', '-'], ['reauth', USER], ['add', USER], ['bootstrap', USER]]) {
+    for (const [purpose, binding] of [['register', HASH], ['login', '-'], ['reauth', USER], ['add', USER]]) {
         const token = await createChallengeToken(secret, { purpose, challenge, binding }, now);
         assert.match(token, new RegExp(`^wa1\\.${purpose}\\.`));
         assert.deepEqual(await read(token, [purpose], binding), { purpose, challenge, binding });
@@ -32,7 +32,7 @@ test('a challenge token round-trips purpose, challenge and binding', async () =>
 test('purpose and subject are fixed: another purpose or binding is rejected', async () => {
     const challenge = newChallenge();
     const reauth = await createChallengeToken(secret, { purpose: 'reauth', challenge, binding: USER }, now);
-    assert.equal(await read(reauth, ['add', 'bootstrap'], USER), null, 'a reauth challenge is not a registration challenge');
+    assert.equal(await read(reauth, ['add'], USER), null, 'a reauth challenge is not a registration challenge');
     assert.equal(await read(reauth, ['login'], '-'), null);
     assert.equal(await read(reauth, ['reauth'], 'u_admin_synthetic'), null, 'bound to another user');
     const login = await createChallengeToken(secret, { purpose: 'login', challenge, binding: '-' }, now);
@@ -70,7 +70,7 @@ test('expires after exactly 5 minutes; future issuance, tampering and other keys
 });
 
 test('challenge tokens and session tokens are never interchangeable', async () => {
-    const env = { SESSION_SECRET: secret, APP_PASSWORD: 'synthetic' };
+    const env = { SESSION_SECRET: secret };
     const challengeToken = await createChallengeToken(secret, { purpose: 'reauth', challenge: newChallenge(), binding: USER }, now);
     assert.equal(await readSession(challengeToken, env, now), null);
     const session = await createSession(secret, { userId: USER, epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki', amr: 'pk' }, now);
@@ -79,6 +79,8 @@ test('challenge tokens and session tokens are never interchangeable', async () =
 
 test('invalid claims are refused at creation', async () => {
     await assert.rejects(createChallengeToken(secret, { purpose: 'other', challenge: newChallenge(), binding: USER }, now));
+    // the password bootstrap of the migration period is gone (U6)
+    await assert.rejects(createChallengeToken(secret, { purpose: 'bootstrap', challenge: newChallenge(), binding: USER }, now));
     await assert.rejects(createChallengeToken(secret, { purpose: 'login', challenge: 'short', binding: '-' }, now));
     await assert.rejects(createChallengeToken(secret, { purpose: 'login', challenge: newChallenge(), binding: USER }, now));
     await assert.rejects(createChallengeToken(secret, { purpose: 'register', challenge: newChallenge(), binding: USER }, now));
@@ -115,7 +117,7 @@ test('RP ID and origin come only from WEBAUTHN_RP_ID / WEBAUTHN_ORIGIN and must 
         assert.equal(webauthnConfig(env), null, JSON.stringify(env));
     }
     // never derived from the request
-    for (const file of ['lib/webauthn.ts', 'app/api/auth/register/options/route.ts', 'app/api/auth/register/verify/route.ts', 'app/api/auth/login/options/route.ts', 'app/api/auth/login/verify/route.ts', 'app/api/auth/passkeys/add/options/route.ts', 'app/api/auth/passkeys/add/reauth/route.ts', 'app/api/auth/passkeys/add/bootstrap/route.ts', 'app/api/auth/passkeys/add/verify/route.ts']) {
+    for (const file of ['lib/webauthn.ts', 'app/api/auth/register/options/route.ts', 'app/api/auth/register/verify/route.ts', 'app/api/auth/login/options/route.ts', 'app/api/auth/login/verify/route.ts', 'app/api/auth/passkeys/add/options/route.ts', 'app/api/auth/passkeys/add/reauth/route.ts', 'app/api/auth/passkeys/add/verify/route.ts']) {
         const source = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
         assert.doesNotMatch(source, /headers\.get\(['"](host|x-forwarded-host|origin)['"]\)|request\.url|nextUrl/i, file);
     }

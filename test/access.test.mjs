@@ -3,15 +3,15 @@ import test from 'node:test';
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decideAccess, homePath, isPublicPath, postLoginPath, safeReturnTo, sourceChoices, switchSourceHref } from '../lib/access.ts';
+import { decideAccess, homePath, isLockExemptPath, isPublicPath, postLoginPath, refreshesActivity, safeReturnTo, sourceChoices, switchSourceHref } from '../lib/access.ts';
 import { tabFromPathname } from '../lib/sources.ts';
 
 // Synthetic sessions (as readSession returns them: home source first)
 const admin = { userId: 'u_admin_synthetic', epoch: 0, sources: ['main', 'yahoo'], homeSource: 'main', amr: 'pk' };
 const yuki = { userId: 'u_member_synthetic', epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki', amr: 'pk' };
 
-const decide = (session, pathname, search = '') => decideAccess({ pathname, search, session });
-const show = d => (d.kind === 'redirect' ? `-> ${d.location}` : d.kind === 'login' ? `login(${d.returnTo})` : d.kind);
+const decide = (session, pathname, search = '', active = true) => decideAccess({ pathname, search, session, active });
+const show = d => (d.kind === 'redirect' ? `-> ${d.location}` : d.kind === 'login' ? `login(${d.returnTo})` : d.kind === 'locked' ? `locked(${d.returnTo})` : d.kind);
 
 // design §8.3: screens (API sources are checked by the proxy, see expenses-proxy.test.mjs)
 const PAGE_TABLE = [
@@ -76,9 +76,41 @@ test('public paths are reachable without a session; look-alikes are not public',
     }
 });
 
-test('a password session without APP_PASSWORD reaches the middleware as null (readSession) and is sent to /login', () => {
-    // readSession returns null for it (test/session.test.mjs); every path then behaves as logged out
+test('a password session reaches the middleware as null (readSession) and is sent to /login', () => {
+    // readSession always returns null for it (test/session.test.mjs); every path then behaves as logged out
     for (const [path, , , anonExpected] of PAGE_TABLE) assert.equal(show(decide(null, path)), anonExpected);
+});
+
+// ---------------------------------------------------------------- app lock (§3.12)
+
+test('app lock: a valid session without the active cookie is locked on every protected screen and API, before the source check', () => {
+    for (const [path, , , anonExpected] of PAGE_TABLE) {
+        for (const session of [admin, yuki]) {
+            assert.equal(show(decide(session, path, '', false)), `locked(${path})`, `${session.userId} ${path}`);
+        }
+        // no session: still the session login (the lock needs a session first)
+        assert.equal(show(decide(null, path, '', false)), anonExpected);
+    }
+    assert.deepEqual(decide(yuki, '/yuki/calendar', '?month=2026-11', false), { kind: 'locked', returnTo: '/yuki/calendar?month=2026-11' });
+    // a screen of another source is locked too (nothing is revealed before Face ID)
+    assert.equal(show(decide(yuki, '/yahoo', '', false)), 'locked(/yahoo)');
+    for (const path of ['/settings/passkeys', '/settings/line']) assert.equal(show(decide(yuki, path, '', false)), `locked(${path})`);
+    for (const path of ['/api/expenses', '/api/auth/session', '/api/auth/passkeys/list', '/api/auth/passkeys/add/options', '/api/auth/logout/all', '/api/auth/line-link/status']) {
+        assert.equal(decide(admin, path, '', false).kind, 'lockedApi', path);
+        assert.equal(decide(null, path, '', false).kind, 'unauthorized', path);
+    }
+});
+
+test('app lock: public paths are never locked; logging out of this device works while locked', () => {
+    for (const path of ['/login', '/invite', '/api/auth/verify', '/api/auth/login/options', '/api/auth/login/verify', '/api/auth/register/verify', '/api/line/webhook', '/manifest.webmanifest', '/yuki-manifest.json', '/icon.png', '/apple-icon.png', '/favicon.ico', '/_next/static/x.js']) {
+        assert.equal(decide(admin, path, '', false).kind, 'allow', path);
+        assert.equal(refreshesActivity(path), false, `${path} does not slide the lock window`);
+    }
+    assert.equal(isLockExemptPath('/api/auth/logout'), true);
+    assert.equal(decide(admin, '/api/auth/logout', '', false).kind, 'allow');
+    assert.equal(refreshesActivity('/api/auth/logout'), false);
+    for (const path of ['/api/auth/logout/all', '/api/auth/logoutX', '/logout']) assert.equal(isLockExemptPath(path), false, path);
+    for (const path of ['/', '/yuki/calendar', '/settings/passkeys', '/api/expenses', '/api/auth/session']) assert.equal(refreshesActivity(path), true, path);
 });
 
 test('account screens (/settings/*) are open to any session, whatever its sources, and protected without one', () => {
@@ -160,8 +192,14 @@ test('middleware: login redirect with reason=session (deleting an invalid cookie
     const { createSession } = await import('../lib/session.ts');
     const { loadRoute } = await import('./helpers/load-route.mjs');
     const secret = randomBytes(32).toString('hex');
-    const mw = await loadRoute('middleware.ts', { env: { SESSION_SECRET: secret, APP_PASSWORD: 'synthetic-password' } });
-    const run = (path, cookie) => mw.middleware(new NextRequest(`http://localhost${path}`, { headers: cookie ? { cookie: `kakeibo_session=${cookie}` } : {} }));
+    const { createActiveToken } = await import('../lib/active-session.ts');
+    const mw = await loadRoute('middleware.ts', { env: { SESSION_SECRET: secret } });
+    const yukiUser = { userId: 'u_member_synthetic', epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki' };
+    const yukiActive = await createActiveToken(secret, yukiUser);
+    // a valid session is sent with its active cookie (an unlocked device)
+    const run = (path, cookie) => mw.middleware(new NextRequest(`http://localhost${path}`, {
+        headers: cookie ? { cookie: `kakeibo_session=${cookie}${cookie === 'forged' ? '' : `; kakeibo_active=${yukiActive}`}` } : {},
+    }));
 
     const anonymous = await run('/yuki/calendar?x=1');
     assert.equal(anonymous.status, 307);
@@ -175,17 +213,99 @@ test('middleware: login redirect with reason=session (deleting an invalid cookie
     assert.equal(invalid.status, 307);
     assert.match(invalid.headers.get('set-cookie'), /kakeibo_session=;/);
 
-    const yukiCookie = await createSession(secret, { userId: 'u_member_synthetic', epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki', amr: 'pk' });
+    const yukiCookie = await createSession(secret, { ...yukiUser, amr: 'pk' });
     const forbidden = await run('/yahoo/manage', yukiCookie);
     assert.equal(forbidden.status, 307);
     assert.equal(new URL(forbidden.headers.get('location')).pathname, '/yuki');
-    assert.equal(forbidden.headers.get('set-cookie'), null);
+    assert.doesNotMatch(forbidden.headers.get('set-cookie') ?? '', /kakeibo_session=/, 'the session is kept');
     assert.equal((await run('/yuki', yukiCookie)).headers.get('x-middleware-next'), '1');
     assert.equal((await run('/login')).headers.get('x-middleware-next'), '1');
 
     const api = await run('/api/expenses?source=main', 'forged');
     assert.equal(api.status, 401);
     assert.deepEqual(await api.json(), { error: 'Unauthorized' });
+});
+
+test('middleware app lock: locked screens go to /login?reason=locked keeping the session; locked APIs get 401 Locked; passing requests slide the window', async () => {
+    const { randomBytes } = await import('node:crypto');
+    const { NextRequest } = await import('next/server.js');
+    const { createSession } = await import('../lib/session.ts');
+    const { ACTIVE_TTL_SECONDS, createActiveToken, isActiveTokenValid } = await import('../lib/active-session.ts');
+    const { loadRoute } = await import('./helpers/load-route.mjs');
+    const secret = randomBytes(32).toString('hex');
+    const mw = await loadRoute('middleware.ts', { env: { SESSION_SECRET: secret, NODE_ENV: 'production' } });
+    const user = { userId: 'u_member_synthetic', epoch: 3, sources: ['yuki', 'main'], homeSource: 'yuki' };
+    const session = await createSession(secret, { ...user, amr: 'pk' });
+    const run = (path, cookies, headers = {}) => mw.middleware(new NextRequest(`http://localhost${path}`, {
+        headers: { cookie: Object.entries(cookies).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`).join('; '), ...headers },
+    }));
+    const setCookies = res => Object.fromEntries(res.headers.getSetCookie().map(line => {
+        const [pair, ...attrs] = line.split(';');
+        const i = pair.indexOf('=');
+        return [pair.slice(0, i).trim(), { value: decodeURIComponent(pair.slice(i + 1)), attrs: attrs.join(';') }];
+    }));
+
+    // idle too long (no / expired / other user / other epoch / tampered / another key's active cookie)
+    const now = Date.now();
+    const lockedCookies = {
+        none: undefined,
+        expired: await createActiveToken(secret, user, now - (ACTIVE_TTL_SECONDS + 1) * 1000),
+        otherUser: await createActiveToken(secret, { ...user, userId: 'u_admin_synthetic' }),
+        oldEpoch: await createActiveToken(secret, { ...user, epoch: 2 }),
+        tampered: `${await createActiveToken(secret, user)}0`,
+        otherKey: await createActiveToken(randomBytes(32).toString('hex'), user),
+    };
+    for (const [label, active] of Object.entries(lockedCookies)) {
+        const screen = await run('/yuki/calendar?month=2026-11', { kakeibo_session: session, kakeibo_active: active });
+        assert.equal(screen.status, 307, label);
+        const location = new URL(screen.headers.get('location'));
+        assert.equal(location.pathname, '/login', label);
+        assert.equal(location.searchParams.get('reason'), 'locked', label);
+        assert.equal(location.searchParams.get('returnTo'), '/yuki/calendar?month=2026-11', label);
+        const cookies = setCookies(screen);
+        assert.equal(cookies.kakeibo_session, undefined, `${label}: the session is kept`);
+        if (active !== undefined) assert.equal(cookies.kakeibo_active.value, '', `${label}: the stale active cookie is deleted`);
+
+        const api = await run('/api/expenses?source=yuki', { kakeibo_session: session, kakeibo_active: active });
+        assert.equal(api.status, 401, label);
+        assert.deepEqual(await api.json(), { error: 'Locked' }, label);
+        assert.equal(api.headers.get('cache-control'), 'no-store');
+        assert.equal(setCookies(api).kakeibo_session, undefined, `${label}: the API keeps the session too`);
+    }
+
+    // active: allowed, and the window slides (a fresh token for this session, HttpOnly, Strict, Secure)
+    for (const path of ['/yuki', '/settings/passkeys', '/api/expenses?source=yuki', '/api/auth/session']) {
+        const res = await run(path, { kakeibo_session: session, kakeibo_active: await createActiveToken(secret, user, now - 20 * 60 * 1000) });
+        assert.equal(res.headers.get('x-middleware-next'), '1', path);
+        const refreshed = setCookies(res).kakeibo_active;
+        assert.ok(refreshed && await isActiveTokenValid(refreshed.value, secret, user), path);
+        for (const attr of [/HttpOnly/i, /SameSite=strict/i, /Secure/i, /Path=\//i, new RegExp(`Max-Age=${ACTIVE_TTL_SECONDS}`)]) assert.match(refreshed.attrs, attr, path);
+    }
+    // a link prefetch passes but does not count as a use
+    const prefetch = await run('/yuki', { kakeibo_session: session, kakeibo_active: await createActiveToken(secret, user) }, { 'next-router-prefetch': '1' });
+    assert.equal(prefetch.headers.get('x-middleware-next'), '1');
+    assert.equal(setCookies(prefetch).kakeibo_active, undefined);
+
+    // public paths: no lock, no slide; opening /login ends the active state
+    const login = await run('/login?reason=locked', { kakeibo_session: session, kakeibo_active: await createActiveToken(secret, user) });
+    assert.equal(login.headers.get('x-middleware-next'), '1');
+    assert.equal(setCookies(login).kakeibo_active.value, '');
+    assert.equal(setCookies(login).kakeibo_session, undefined);
+    for (const path of ['/invite', '/manifest.webmanifest', '/api/line/webhook']) {
+        const res = await run(path, { kakeibo_session: session });
+        assert.equal(res.headers.get('x-middleware-next'), '1', path);
+        assert.deepEqual(res.headers.getSetCookie(), [], path);
+    }
+    // logout of this device works while locked and does not slide
+    const logout = await run('/api/auth/logout', { kakeibo_session: session });
+    assert.equal(logout.headers.get('x-middleware-next'), '1');
+    assert.deepEqual(logout.headers.getSetCookie(), []);
+
+    // an invalid session: the session login (cache cleared there), both cookies deleted
+    const invalid = await run('/yuki', { kakeibo_session: 'forged', kakeibo_active: await createActiveToken(secret, user) });
+    assert.equal(new URL(invalid.headers.get('location')).searchParams.get('reason'), 'session');
+    assert.equal(setCookies(invalid).kakeibo_session.value, '');
+    assert.equal(setCookies(invalid).kakeibo_active.value, '');
 });
 
 test('middleware matcher runs on every path but Next build assets (no prefix exclusions such as "login")', async () => {

@@ -86,7 +86,7 @@ async function currentSession() {
 }
 
 // Checks shared by GET and POST, before GAS or the cache is touched: the
-// session (signature, expiry, amr=pwd after APP_PASSWORD removal), the source
+// session (signature, expiry, the removed password login's amr=pwd), the source
 // against the session's sources, and the auth proxy secret (an actor is
 // always sent, so a missing authKey fails closed instead of sending an
 // actor-less request).

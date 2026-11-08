@@ -3,10 +3,11 @@
 // purpose and one subject, deleted by every verify (success or failure).
 //
 // Token: wa1.<purpose>.<issued>.<expires>.<challenge>.<binding>.<sig>
-// - purpose: register | login | reauth | add | bootstrap
+// - purpose: register | login | reauth | add ('bootstrap', the password
+//   re-entry of the migration period, was removed in U6 and is rejected)
 // - challenge: 32 random bytes, base64url (what the authenticator signs)
 // - binding: register -> invite token hash (64 hex), login -> '-',
-//   reauth / add / bootstrap -> the session userId
+//   reauth / add -> the session userId
 // - sig: HMAC-SHA256 hex with a key derived from SESSION_SECRET for this use
 //   only (HMAC(SESSION_SECRET, CHALLENGE_KEY_LABEL)), so a challenge token is
 //   never a session token and vice versa (different key and format).
@@ -22,7 +23,7 @@ export const CHALLENGE_COOKIE_PATH = '/api/auth';
 const CHALLENGE_KEY_LABEL = 'kakeibo/webauthn-challenge/v1';
 const MAX_TOKEN_LENGTH = 256;
 
-export type ChallengePurpose = 'register' | 'login' | 'reauth' | 'add' | 'bootstrap';
+export type ChallengePurpose = 'register' | 'login' | 'reauth' | 'add';
 export const LOGIN_BINDING = '-';
 
 export interface ChallengeClaims {
@@ -31,11 +32,11 @@ export interface ChallengeClaims {
     binding: string;
 }
 
-const PURPOSES: readonly ChallengePurpose[] = Object.freeze(['register', 'login', 'reauth', 'add', 'bootstrap']);
+const PURPOSES: readonly ChallengePurpose[] = Object.freeze(['register', 'login', 'reauth', 'add']);
 const CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const USER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
-const TOKEN_PATTERN = /^(wa1\.(register|login|reauth|add|bootstrap)\.([1-9]\d{0,14})\.([1-9]\d{0,14})\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{1,64}))\.([a-f0-9]{64})$/;
+const TOKEN_PATTERN = /^(wa1\.(register|login|reauth|add)\.([1-9]\d{0,14})\.([1-9]\d{0,14})\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{1,64}))\.([a-f0-9]{64})$/;
 
 function isValidBinding(purpose: ChallengePurpose, binding: string): boolean {
     if (purpose === 'register') return HASH_PATTERN.test(binding);

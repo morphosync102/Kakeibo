@@ -291,6 +291,12 @@ Vercel から NAS へ移しても GAS を経由する限り体感はほぼ変わ
   管理者による招待悪用の可視化(Yuki への緩和策)なので、実装までは Yuki への説明を「当面は通知なし」とする。GASデプロイ必要。
 - 8-2. 全端末が新 UI に切り替わったら Script Property `AUTHZ_ENFORCE=1`。約2週間後に U6(パスワード・v1 互換の削除)/
   G5(`AUTHZ_ENFORCE` 未設定時の互換と `PROXY_SECRET` 未設定時の素通しの削除。IMPROVEMENTS 4-1 の完了)。
+  - **U6 対応(コード、2026-11)**: パスワードログインをコードで無効化(Vercel の `APP_PASSWORD` は削除しない決定。参照コードなし・残っていても無効)。
+    `/api/auth/verify` は常に 404、`amr=pwd` は常に無効、`/login` のパスワード欄と bootstrap を削除。復旧は GAS エディタの
+    `createAdminRecoveryInvite()` / `createYukiRecoveryInvite()` のみ(SPECIFICATION §2「認証」)。同時に招待画面のアプリ内ブラウザ不具合の修正と、
+    アイドル30分のアプリロック(設計書§3.12)を追加。
+  - **U6 残り**: E2E(`test/auth.browser.mjs`・`test/statistics-search.browser.mjs`)はパスワードでログインしているため、仮想認証器版への置換が必要。
+    GAS の `authGetAdminUser` / bootstrap 分岐の削除は G5 で検討(Next.js からは呼ばない)。
 - 8-3. 三井住友カード(Vpass)の通知メールが 2025-03 以降「ご利用日時：」形式に変わり、`parseOliveBody`(旧「◇利用日：」形式)が
   取り込めていない可能性。新形式パーサと過去分の再取込。Yuki のカード(同じ三井住友カード)の取込にも共通で使う。
   - **対応(コード)**: 新形式の純粋関数パーサ `parseVpassBody` と新旧両対応の `parseVpassEmail`、事前確認 `previewVpassReimport` /

@@ -3,7 +3,8 @@
 //
 // Token: v2.<issued>.<expires>.<nonce>.<userId>.<epoch>.<sources>.<amr>.<sig>
 // - sources: '+'-joined source ids, the home source first
-// - amr: 'pwd' (shared password, migration period) or 'pk' (passkey)
+// - amr: always 'pk' (passkey). 'pwd' was the shared-password login of the
+//   migration period (removed in U6): such tokens are always rejected.
 // - sig: HMAC-SHA256(SESSION_SECRET) over everything before it
 // v1 tokens (no user) are rejected: everyone logs in again once.
 // Keep free of `@/` and runtime imports so node --test can load it directly.
@@ -20,7 +21,8 @@ export const SESSION_SOURCE_IDS: readonly string[] = Object.freeze(['main', 'yah
 const USER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_EPOCH = 1000000000;
 
-export type Amr = 'pwd' | 'pk';
+// Only passkey sessions exist; the password login was removed (U6)
+export type Amr = 'pk';
 
 export interface SessionUser {
     userId: string;
@@ -40,17 +42,11 @@ export interface Session {
 // The environment readSession depends on (pass process.env)
 export interface SessionEnv {
     SESSION_SECRET?: string;
-    APP_PASSWORD?: string;
     [name: string]: string | undefined;
 }
 
 export function isSessionSecretConfigured(secret: string | undefined): secret is string {
     return typeof secret === 'string' && /^[a-f0-9]{64}$/i.test(secret);
-}
-
-// Password login exists only while APP_PASSWORD is set (migration period).
-export function isPasswordLoginEnabled(env: SessionEnv): boolean {
-    return typeof env.APP_PASSWORD === 'string' && env.APP_PASSWORD !== '';
 }
 
 function fromHex(value: string) {
@@ -71,7 +67,7 @@ function isEpoch(value: unknown): value is number {
 }
 
 // Validated user with the home source first, or null. Also used for the user
-// GAS returns (authGetAdminUser) before a session is issued from it.
+// GAS returns (invite registration, passkey login) before a session is issued from it.
 export function normalizeSessionUser(user: unknown): SessionUser | null {
     if (!user || typeof user !== 'object') return null;
     const { userId, epoch, sources, homeSource } = user as Record<string, unknown>;
@@ -87,7 +83,7 @@ export async function createSession(secret: string, user: SessionUser & { amr: A
     const key = await signingKey(secret);
     const normalized = normalizeSessionUser(user);
     if (!normalized) throw new Error('Invalid session user');
-    if (user.amr !== 'pwd' && user.amr !== 'pk') throw new Error('Invalid session amr');
+    if (user.amr !== 'pk') throw new Error('Invalid session amr');
     const issued = Math.floor(now / 1000);
     const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
     const payload = ['v2', issued, issued + SESSION_TTL_SECONDS, nonce, normalized.userId, normalized.epoch, normalized.sources.join('+'), user.amr].join('.');
@@ -101,7 +97,8 @@ const TOKEN_PATTERN = /^(v2\.([1-9]\d{0,14})\.([1-9]\d{0,14})\.[a-f0-9]{32}\.([A
 
 // The signed-in user, or null for anything invalid: malformed, tampered,
 // expired, issued in the future, v1, signed with another key, or a password
-// session (amr=pwd) after APP_PASSWORD was removed.
+// session of the migration period (amr=pwd: always, whatever the environment;
+// the middleware then sends the screen to /login?reason=session).
 export async function readSession(token: unknown, env: SessionEnv, now = Date.now()): Promise<Session | null> {
     const secret = env.SESSION_SECRET;
     if (!isSessionSecretConfigured(secret) || typeof token !== 'string' || token.length > MAX_TOKEN_LENGTH) return null;
@@ -120,11 +117,11 @@ export async function readSession(token: unknown, env: SessionEnv, now = Date.no
         return null;
     }
     if (!valid) return null;
-    if (amr === 'pwd' && !isPasswordLoginEnabled(env)) return null;
+    if (amr !== 'pk') return null; // amr=pwd: the password login is gone
     const sources = sourcesText.split('+');
     const user = normalizeSessionUser({ userId, epoch: Number(epochText), sources, homeSource: sources[0] });
     if (!user) return null;
-    return { userId: user.userId, epoch: user.epoch, sources: [...user.sources], homeSource: user.homeSource, amr: amr as Amr };
+    return { userId: user.userId, epoch: user.epoch, sources: [...user.sources], homeSource: user.homeSource, amr: 'pk' };
 }
 
 // Cookie attributes (HttpOnly, SameSite=Strict, Path=/, Secure in production)

@@ -6,6 +6,7 @@ import { createSession } from '../lib/session.ts';
 import { lineLinkableSources } from '../lib/sources.ts';
 import { loadRoute } from './helpers/load-route.mjs';
 import { createFakeGas } from './helpers/fake-gas-auth.mjs';
+import { legacyPasswordSession } from './helpers/legacy-session.mjs';
 
 // U4 (own passkeys: list / revoke / log out everywhere) and the U5 LINE
 // linking routes, against the in-memory GAS. Synthetic values only.
@@ -98,9 +99,8 @@ test('log out everywhere bumps the own epoch and deletes this session cookie', a
 test('U4 / U5 routes need a valid session (401, no GAS) and keep the cookie on GAS failures', async () => {
     const paths = ['auth/passkeys/list', 'auth/passkeys/revoke', 'auth/logout/all', 'auth/line-link/code', 'auth/line-link/status', 'auth/line-link/confirm'];
     for (const path of paths) {
-        for (const session of [undefined, 'forged', await sessionOf(ADMIN, 'pwd')]) {
-            const env = session && session !== 'forged' ? { APP_PASSWORD: undefined } : {};
-            const res = await call(path, { session, env, body: { credentialId: 'cred_yuki_1', decision: 'confirm' } });
+        for (const session of [undefined, 'forged', legacyPasswordSession(secret, ADMIN)]) {
+            const res = await call(path, { session, body: { credentialId: 'cred_yuki_1', decision: 'confirm' } });
             assert.equal(res.status, 401, path);
             assert.deepEqual(res.bodies, [], path);
         }

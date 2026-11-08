@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { WRITE_ACTIONS, gasErrorStatus, isAllowedSource, parseGasList, redactSecret, toGasBody, toGasQuery, withGasAuth } from '../lib/expenses-proxy.ts';
 import { createSession } from '../lib/session.ts';
 import { loadRoute, setCookieValue, SYNTHETIC_GAS_URL } from './helpers/load-route.mjs';
+import { legacyPasswordSession } from './helpers/legacy-session.mjs';
 
 // Synthetic values only
 const secret = randomBytes(32).toString('hex');
@@ -337,15 +338,17 @@ test('other GAS errors: GET answers 502, POST passes {error} through; secrets ne
 
 // ---------------------------------------------------------------- sessions
 
-test('without APP_PASSWORD a password session is 401 for GET (cached path included) and POST, reading neither GAS nor the cache', async () => {
-  const r = await route({ amr: 'pwd', env: { APP_PASSWORD: undefined } });
-  for (const res of [await r.GET(getReq('?source=main')), await r.GET(getReq('?source=main&fresh=1')), await r.POST(postReq({ action: 'addTransaction', source: 'main' }))]) {
-    assert.equal(res.status, 401);
+test('a password session (amr=pwd) is always 401 for GET (cached path included) and POST, reading neither GAS nor the cache', async () => {
+  // even with a leftover APP_PASSWORD in the environment (BASE_ENV) or without it
+  for (const env of [{}, { APP_PASSWORD: undefined }]) {
+    const r = await route({ cookie: legacyPasswordSession(secret, ADMIN), env });
+    for (const res of [await r.GET(getReq('?source=main')), await r.GET(getReq('?source=main&fresh=1')), await r.POST(postReq({ action: 'addTransaction', source: 'main' }))]) {
+      assert.equal(res.status, 401);
+    }
+    assert.equal(r.calls.length, 0);
+    assert.equal(r.cachedCalls.length, 0);
   }
-  assert.equal(r.calls.length, 0);
-  assert.equal(r.cachedCalls.length, 0);
-  // with APP_PASSWORD (migration period) the same session works; passkey sessions work without it
-  assert.equal((await (await route({ amr: 'pwd' })).GET(getReq('?source=main'))).status, 200);
+  // passkey sessions work, whatever APP_PASSWORD is
   assert.equal((await (await route({ amr: 'pk', env: { APP_PASSWORD: undefined } })).GET(getReq('?source=main'))).status, 200);
 });
 

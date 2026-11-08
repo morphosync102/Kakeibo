@@ -39,12 +39,18 @@ const API_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
     VerificationFailed: 'パスキーを確認できませんでした。もう一度お試しください',
     NotAllowed: 'この操作はできません',
     Unauthorized: 'ログインし直してください',
-    'Incorrect password': 'パスワードが違います',
-    'Not Found': 'パスワードでの確認は終了しました',
     CredentialNotFound: 'そのパスキーは見つかりません(失効済みの可能性があります)',
     NoCandidate: '確認待ちの LINE がありません。コードを発行し直してください',
     ProfileUnavailable: 'LINE の名前を取得できませんでした。時間をおいて再度お試しください',
 });
+
+// A 401 that ends the screen: the session is gone (Unauthorized) or the app
+// is locked (Locked, design §3.12). Pass result.data.error to
+// lib/client-session.ts handleUnauthorized. Other 401s (VerificationFailed)
+// are shown as messages.
+export function isSessionFailure(result: ApiResult): boolean {
+    return result.status === 401 && (result.data.error === 'Unauthorized' || result.data.error === 'Locked');
+}
 
 export const GENERIC_ERROR_MESSAGE = 'うまくいきませんでした。時間をおいて再度お試しください';
 
@@ -75,6 +81,18 @@ export function isInAppBrowser(userAgent: string): boolean {
     return /\bLine\/|FBAN|FBAV|FB_IAB|Instagram|MicroMessenger|KAKAOTALK|Twitter/i.test(userAgent);
 }
 
+// /invite: the token is removed from the address bar at once, except in an
+// in-app browser, where "Open in Safari" hands over the current URL and needs
+// the fragment (removing it broke registrations started from LINE). The
+// token is one-time, valid 24 hours and consumed by the registration.
+export function shouldClearInviteFragment(userAgent: string): boolean {
+    return !isInAppBrowser(userAgent);
+}
+
+export const INVITE_COPY_TO_SAFARI_HINT = 'うまくいかない場合は、届いたリンクを長押しでコピーし、Safari のアドレス欄に貼り付けて開いてください(iMessage で送ってもらうと確実です)。';
+export const INVITE_IN_APP_BROWSER_NOTICE = `LINE などのアプリ内ブラウザでは登録できないことがあります。右下(または右上)のメニューから「Safariで開く」を選んでください。${INVITE_COPY_TO_SAFARI_HINT}`;
+export const INVITE_MISSING_TOKEN_MESSAGE = `招待リンクが正しくありません。${INVITE_COPY_TO_SAFARI_HINT}`;
+
 // A redirect target from our API (same-origin path) or the fallback
 export function safeRedirect(value: unknown, fallback = '/'): string {
     return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') && !value.includes('\\') ? value : fallback;
@@ -93,17 +111,23 @@ export function isLoggedOutLanding(searchParams: { get(name: string): string | n
 }
 
 // /login starts the passkey by itself only when the challenge is ready, the
-// browser has WebAuthn, it is not an in-app browser, the user did not just
-// log out and is not typing the password.
+// browser has WebAuthn, it is not an in-app browser and the user did not just
+// log out (the app lock screen, reason=locked, starts it too).
 export function shouldAutoStartPasskey(c: {
     optionsReady: boolean;
     supported: boolean;
     inAppBrowser: boolean;
     loggedOut: boolean;
-    typingPassword: boolean;
 }): boolean {
-    return c.optionsReady && c.supported && !c.inAppBrowser && !c.loggedOut && !c.typingPassword;
+    return c.optionsReady && c.supported && !c.inAppBrowser && !c.loggedOut;
 }
+
+// /login?reason=locked: the app lock screen (design §3.12)
+export function isLockedLanding(searchParams: { get(name: string): string | null }): boolean {
+    return searchParams.get('reason') === 'locked';
+}
+
+export const LOCKED_NOTICE = 'しばらく操作がなかったため、ロックしました。顔認証で再開します。';
 
 // At most one automatic attempt per page (never a retry loop)
 export function createAutoStartGate() {

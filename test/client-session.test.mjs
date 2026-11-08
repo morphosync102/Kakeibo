@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { LOGGED_OUT_PATH, LOGIN_USER_KEY, SESSION_EXPIRED_PATH, clearKakeiboStorage, handleSessionExpired, logout, rememberLoginUser } from '../lib/client-session.ts';
+import {
+    LOGGED_OUT_PATH, LOGIN_USER_KEY, SESSION_EXPIRED_PATH, clearKakeiboStorage, handleAppLocked, handleSessionExpired, handleUnauthorized,
+    logout, rememberLoginUser, unauthorizedError,
+} from '../lib/client-session.ts';
 
 // Map-backed Storage (the Web Storage API subset the module uses)
 function memoryStorage(entries = {}) {
@@ -124,9 +127,93 @@ test('the login page clears the cache for reason=session and records the user af
     assert.match(page, /clearKakeiboStorage\(/);
     assert.match(page, /rememberLoginUser\(/);
     assert.doesNotMatch(page, /router\.push\(returnTo/, 'returnTo is validated by the server (redirectTo)');
-    // both logins (password and passkey) go through the same housekeeping
     assert.match(page, /\/api\/auth\/login\/verify/);
-    assert.match(page, /\/api\/auth\/verify/);
+    // the app lock's idle clock restarts with the login (else the next screen would lock at once)
+    assert.match(page, /rememberLoginUser\(storage, data\.userId\);\s*markAppActive\(storage\);\s*window\.location\.assign/);
+    // the lock screen keeps the cache: only reason=session clears it
+    assert.match(page, /if \(sessionEnded\) clearKakeiboStorage\(\);/);
+    assert.match(page, /isLockedLanding\(searchParams\)/);
+});
+
+test('the invite registration restarts the app lock\'s idle clock', () => {
+    const page = fs.readFileSync(new URL('../app/invite/page.tsx', import.meta.url), 'utf8');
+    assert.match(page, /rememberLoginUser\(storage, result\.data\.userId\);\s*markAppActive\(storage\);/);
+});
+
+// ---------------------------------------------------------------- app lock: 401 Locked keeps the cache
+
+const lockedLocation = (visited, pathname = '/yuki/calendar', search = '?month=2026-11') => ({ assign: url => visited.push(url), pathname, search });
+
+test('a 401 Locked opens the lock screen for the current screen and keeps the cache; other 401s clear it', () => {
+    const storage = memoryStorage(cached());
+    const visited = [];
+    handleAppLocked({ location: lockedLocation(visited) });
+    assert.deepEqual(visited, ['/login?returnTo=%2Fyuki%2Fcalendar%3Fmonth%3D2026-11&reason=locked']);
+    assert.equal(storage.keys().length, 5);
+
+    handleUnauthorized('Locked', { storage, location: lockedLocation(visited, '/', '') });
+    assert.equal(storage.keys().length, 5, 'Locked: same user, the cache stays');
+    assert.equal(visited[1], '/login?returnTo=%2F&reason=locked');
+
+    for (const error of ['Unauthorized', '', undefined, 'locked']) {
+        const s = memoryStorage(cached());
+        const v = [];
+        handleUnauthorized(error, { storage: s, location: lockedLocation(v) });
+        assert.deepEqual(s.keys(), ['other_app_key'], String(error));
+        assert.deepEqual(v, ['/login?reason=session'], String(error));
+    }
+    handleAppLocked({ location: undefined }); // no browser: no throw
+});
+
+test('unauthorizedError reads the error word of a 401 body and never throws', async () => {
+    assert.equal(await unauthorizedError(Response.json({ error: 'Locked' }, { status: 401 })), 'Locked');
+    assert.equal(await unauthorizedError(Response.json({ error: 'Unauthorized' }, { status: 401 })), 'Unauthorized');
+    assert.equal(await unauthorizedError(new Response('not json', { status: 401 })), '');
+    assert.equal(await unauthorizedError(Response.json([1], { status: 401 })), '');
+    assert.equal(await unauthorizedError({}), '', 'a stub without clone()');
+    // the body is still readable by the caller
+    const res = Response.json({ error: 'Locked' }, { status: 401 });
+    await unauthorizedError(res);
+    assert.deepEqual(await res.json(), { error: 'Locked' });
+});
+
+function withLockedBrowser(t, entries) {
+    const storage = memoryStorage(entries);
+    const visited = [];
+    t.mock.property(globalThis, 'localStorage', storage);
+    t.mock.property(globalThis, 'location', lockedLocation(visited));
+    return { storage, visited };
+}
+
+test('fetchExpenses on 401 Locked keeps the cache, opens the lock screen and still fails', async (t) => {
+    if (!('localStorage' in globalThis)) globalThis.localStorage = undefined;
+    if (!('location' in globalThis)) globalThis.location = undefined;
+    const { storage, visited } = withLockedBrowser(t, cached());
+    const { fetchExpenses } = await import('../lib/api.ts');
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'Locked' }, { status: 401 }));
+    await assert.rejects(fetchExpenses('yuki'));
+    assert.equal(storage.keys().length, 5);
+    assert.deepEqual(visited, ['/login?returnTo=%2Fyuki%2Fcalendar%3Fmonth%3D2026-11&reason=locked']);
+});
+
+test('postWrite on 401 Locked keeps the cache, opens the lock screen and rejects (nothing was written)', async (t) => {
+    if (!('localStorage' in globalThis)) globalThis.localStorage = undefined;
+    if (!('location' in globalThis)) globalThis.location = undefined;
+    const { storage, visited } = withLockedBrowser(t, cached());
+    const { postWrite } = await import('../lib/write-queue.ts');
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'Locked' }, { status: 401 }));
+    await assert.rejects(postWrite({ action: 'addTransaction', source: 'yuki' }), /Locked/);
+    assert.equal(storage.keys().length, 5);
+    assert.deepEqual(visited, ['/login?returnTo=%2Fyuki%2Fcalendar%3Fmonth%3D2026-11&reason=locked']);
+});
+
+test('the settings screens treat 401 Locked like the lock (cache kept) and 401 Unauthorized like an ended session', () => {
+    for (const file of ['app/settings/passkeys/page.tsx', 'app/settings/line/page.tsx']) {
+        const page = fs.readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+        assert.match(page, /isSessionFailure\(result\)/, file);
+        assert.match(page, /handleUnauthorized\(result\.data\.error\)/, file);
+        assert.doesNotMatch(page, /handleSessionExpired\(\)/, file);
+    }
 });
 
 test('the invite page records the new user (clearing another user\'s cache) and removes the token from the address bar', () => {
@@ -136,10 +223,29 @@ test('the invite page records the new user (clearing another user\'s cache) and 
     assert.doesNotMatch(page, /console\./, 'the token is never logged');
 });
 
-test('the password form of /login exists only while APP_PASSWORD is set (rendered per request)', () => {
+test('in an in-app browser the invite token stays in the URL (needed by "Open in Safari"); elsewhere it is removed at once', () => {
+    const page = fs.readFileSync(new URL('../app/invite/page.tsx', import.meta.url), 'utf8');
+    // every replaceState on arrival is behind the decision
+    assert.match(page, /if \(shouldClearInviteFragment\(navigator\.userAgent\)\) window\.history\.replaceState\(null, '', '\/invite'\);/);
+    const onArrival = page.slice(page.indexOf('useEffect(() => {'), page.indexOf('}, []);'));
+    assert.ok(onArrival.includes('shouldClearInviteFragment'));
+    assert.doesNotMatch(onArrival, /^\s*window\.history\.replaceState\(null, '', '\/invite'\);\s*$/m, 'no unconditional replaceState on arrival');
+    // after the registration the (consumed) token is dropped everywhere
+    assert.match(page, /tokenRef\.current = null;[\s\S]{0,120}window\.history\.replaceState\(null, '', '\/invite'\);/);
+    assert.match(page, /INVITE_MISSING_TOKEN_MESSAGE/);
+    assert.match(page, /INVITE_IN_APP_BROWSER_NOTICE/);
+});
+
+test('/login has no password form any more (passkey only)', () => {
     const page = fs.readFileSync(new URL('../app/login/page.tsx', import.meta.url), 'utf8');
-    assert.match(page, /await connection\(\)/);
-    assert.match(page, /isPasswordLoginEnabled\(process\.env\)/);
     const form = fs.readFileSync(new URL('../app/login/LoginForm.tsx', import.meta.url), 'utf8');
-    assert.match(form, /\{passwordEnabled && \(/);
+    for (const source of [page, form]) {
+        assert.doesNotMatch(source, /type="password"|passwordEnabled|isPasswordLoginEnabled|\/api\/auth\/verify|パスワードでログイン|移行期間/);
+    }
+    assert.match(form, /顔認証でログイン/);
+});
+
+test('/settings/passkeys has no password bootstrap any more', () => {
+    const page = fs.readFileSync(new URL('../app/settings/passkeys/page.tsx', import.meta.url), 'utf8');
+    assert.doesNotMatch(page, /type="password"|bootstrap|\/api\/auth\/passkeys\/add\/bootstrap/);
 });

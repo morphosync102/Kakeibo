@@ -1,24 +1,24 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { browserSupportsWebAuthn, startAuthentication, startRegistration } from "@simplewebauthn/browser";
 import type { PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
-import { handleSessionExpired, logout } from "@/lib/client-session";
-import { apiErrorMessage, ceremonyErrorMessage, postAuthJson, type ApiResult } from "@/lib/passkey-client";
+import { handleUnauthorized, logout } from "@/lib/client-session";
+import { apiErrorMessage, ceremonyErrorMessage, isSessionFailure, postAuthJson, type ApiResult } from "@/lib/passkey-client";
 
 // The signed-in user's passkeys (design §3.3, §3.8, §3.9):
 // - list of the user's own passkeys, revoke one (U4)
 // - "log out on every device" (U4)
 // - add a passkey (U3): a session alone is not enough: first re-authenticate
 //   with an existing passkey, then register the new one (two taps, since iOS
-//   wants each WebAuthn call in its own tap). Only the admin without any
-//   passkey (bootstrap, migration period) re-enters the shared password.
+//   wants each WebAuthn call in its own tap). There is no password path: a
+//   user without passkeys needs a recovery invite (GAS editor).
 // Revoking a passkey and logging out everywhere end every session of the
 // user, this one included (epoch +1): the cache is cleared and /login opens.
 
 type Phase =
     | 'idle' | 'loading' | 'unsupported' | 'failed'
-    | 'reauth' | 'bootstrap' | 'working'
+    | 'reauth' | 'working'
     | 'register' | 'done';
 
 interface PasskeyItem {
@@ -37,7 +37,6 @@ function formatDate(value: string): string {
 export default function PasskeysPage() {
     const [phase, setPhase] = useState<Phase>('idle');
     const [error, setError] = useState<string | null>(null);
-    const [password, setPassword] = useState('');
     const [credentialCount, setCredentialCount] = useState<number | null>(null);
     const [passkeys, setPasskeys] = useState<PasskeyItem[] | null>(null);
     const [listError, setListError] = useState<string | null>(null);
@@ -46,10 +45,11 @@ export default function PasskeysPage() {
     const reauthOptions = useRef<PublicKeyCredentialRequestOptionsJSON | null>(null);
     const registerOptions = useRef<PublicKeyCredentialCreationOptionsJSON | null>(null);
 
-    // 401: the session ended (expired, revoked): clear the cache, go to /login
+    // 401: the session ended (expired, revoked): clear the cache, go to
+    // /login; or the app is locked: keep the cache, open the lock screen
     const failWith = (result: ApiResult, next: Phase) => {
-        if (result.status === 401 && result.data.error === 'Unauthorized') {
-            handleSessionExpired();
+        if (isSessionFailure(result)) {
+            handleUnauthorized(result.data.error);
             return;
         }
         setError(apiErrorMessage(result));
@@ -59,7 +59,7 @@ export default function PasskeysPage() {
     const loadList = useCallback(async () => {
         const result = await postAuthJson('/api/auth/passkeys/list');
         if (!result.ok) {
-            if (result.status === 401 && result.data.error === 'Unauthorized') return handleSessionExpired();
+            if (isSessionFailure(result)) return handleUnauthorized(result.data.error);
             setListError(apiErrorMessage(result));
             return;
         }
@@ -86,7 +86,7 @@ export default function PasskeysPage() {
         const result = await postAuthJson('/api/auth/passkeys/revoke', { credentialId });
         if (result.ok) return endedEverywhere();
         setBusy(false);
-        if (result.status === 401 && result.data.error === 'Unauthorized') return handleSessionExpired();
+        if (isSessionFailure(result)) return handleUnauthorized(result.data.error);
         setListError(apiErrorMessage(result));
         void loadList();
     };
@@ -98,7 +98,7 @@ export default function PasskeysPage() {
         const result = await postAuthJson('/api/auth/logout/all');
         if (result.ok) return endedEverywhere();
         setBusy(false);
-        if (result.status === 401 && result.data.error === 'Unauthorized') return handleSessionExpired();
+        if (isSessionFailure(result)) return handleUnauthorized(result.data.error);
         setListError(apiErrorMessage(result));
     };
 
@@ -107,7 +107,6 @@ export default function PasskeysPage() {
         setPhase('loading');
         const result = await postAuthJson('/api/auth/passkeys/add/options');
         if (!result.ok) return failWith(result, 'failed');
-        if (result.data.mode === 'bootstrap') return setPhase('bootstrap');
         reauthOptions.current = result.data.options as PublicKeyCredentialRequestOptionsJSON;
         setPhase('reauth');
     };
@@ -127,25 +126,6 @@ export default function PasskeysPage() {
         }
         const result = await postAuthJson('/api/auth/passkeys/add/reauth', { response });
         if (!result.ok) {
-            failWith(result, 'failed');
-            return;
-        }
-        registerOptions.current = result.data.options as PublicKeyCredentialCreationOptionsJSON;
-        setPhase('register');
-    };
-
-    const bootstrap = async (e: FormEvent) => {
-        e.preventDefault();
-        setError(null);
-        setPhase('working');
-        const result = await postAuthJson('/api/auth/passkeys/add/bootstrap', { password });
-        setPassword('');
-        if (!result.ok) {
-            if (result.status === 401 && result.data.error === 'Incorrect password') {
-                setError(apiErrorMessage(result));
-                setPhase('bootstrap');
-                return;
-            }
             failWith(result, 'failed');
             return;
         }
@@ -237,26 +217,6 @@ export default function PasskeysPage() {
                                 登録済みのパスキーで確認
                             </button>
                         </>
-                    )}
-
-                    {phase === 'bootstrap' && (
-                        <form onSubmit={bootstrap} className="space-y-4">
-                            <p className="text-gray-600 text-sm">
-                                まだパスキーがありません。最初の1つは、本人確認としてパスワードを入力してください(管理者のみ)。
-                            </p>
-                            <input
-                                type="password"
-                                name="password"
-                                autoComplete="current-password"
-                                value={password}
-                                onChange={e => setPassword(e.target.value)}
-                                className="w-full px-4 py-3 rounded-lg border border-gray-300 outline-none text-gray-800"
-                                placeholder="Password"
-                            />
-                            <button type="submit" disabled={password.length === 0} className={buttonClass(password.length === 0)}>
-                                確認
-                            </button>
-                        </form>
                     )}
 
                     {phase === 'working' && <p className="text-gray-500 text-sm text-center">処理しています...</p>}

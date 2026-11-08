@@ -36,6 +36,8 @@ export async function loadRoute(path, { env = {}, cookie, cookies = {}, upstream
         '@/lib/passkey-assertion': await import('../../lib/passkey-assertion.ts'),
         '@/lib/line-webhook': await import('../../lib/line-webhook.ts'),
         '@/lib/sources': await import('../../lib/sources.ts'),
+        '@/lib/active-session': await import('../../lib/active-session.ts'),
+        '@/lib/app-lock': await import('../../lib/app-lock.ts'),
     };
     // next/server's after(): collected here and run by runAfter() (the
     // response is returned first, as on Vercel)

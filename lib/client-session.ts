@@ -1,9 +1,12 @@
 // Client-side session housekeeping (design §3.8). Every key this app stores
 // in localStorage starts with `kakeibo_` (cached lists, the last user), and
 // all of them are removed when the session ends or the user changes, so a
-// shared device never shows the previous user's data.
-// No imports: node --test loads it directly. Storage / location are
-// injectable for tests and default to the browser globals.
+// shared device never shows the previous user's data. The app lock (§3.12)
+// is different: same user, same session, so the cache is kept.
+// Relative imports only: node --test loads it directly. Storage / location
+// are injectable for tests and default to the browser globals.
+
+import { LOCKED_ERROR, lockedLoginPath } from './app-lock.ts';
 
 export const KAKEIBO_STORAGE_PREFIX = 'kakeibo_';
 export const LOGIN_USER_KEY = 'kakeibo_user';
@@ -11,6 +14,7 @@ export const SESSION_EXPIRED_PATH = '/login?reason=session';
 
 type StorageLike = Pick<Storage, 'length' | 'key' | 'getItem' | 'setItem' | 'removeItem'>;
 type LocationLike = Pick<Location, 'assign'>;
+type CurrentLocationLike = Pick<Location, 'assign' | 'pathname' | 'search'>;
 
 export function browserStorage(): StorageLike | undefined {
     try {
@@ -20,7 +24,7 @@ export function browserStorage(): StorageLike | undefined {
     }
 }
 
-function browserLocation(): LocationLike | undefined {
+function browserLocation(): CurrentLocationLike | undefined {
     return typeof location === 'undefined' ? undefined : location;
 }
 
@@ -57,6 +61,32 @@ export function rememberLoginUser(storage: StorageLike | undefined, userId: stri
 export function handleSessionExpired({ storage = browserStorage(), location = browserLocation() }: { storage?: StorageLike; location?: LocationLike } = {}): void {
     clearKakeiboStorage(storage);
     location?.assign(SESSION_EXPIRED_PATH);
+}
+
+// The server answered 401 Locked (app lock, §3.12): the session is valid and
+// the user is the same, so the cache stays (no refetch after Face ID). Opens
+// the lock screen, which comes back here after the login. If someone else
+// logs in there, rememberLoginUser clears the cache as usual.
+export function handleAppLocked({ location = browserLocation() }: { location?: CurrentLocationLike } = {}): void {
+    if (!location) return;
+    location.assign(lockedLoginPath(`${location.pathname}${location.search}`));
+}
+
+// Any 401 of our APIs, by its error word: Locked -> lock screen (cache kept),
+// anything else (Unauthorized: invalid, expired, revoked) -> cache cleared.
+export function handleUnauthorized(error: unknown, deps: { storage?: StorageLike; location?: CurrentLocationLike } = {}): void {
+    if (error === LOCKED_ERROR) handleAppLocked(deps);
+    else handleSessionExpired(deps);
+}
+
+// The error word of a 401 JSON body ('' when unreadable). Never throws.
+export async function unauthorizedError(res: Pick<Response, 'clone'>): Promise<string> {
+    try {
+        const body = await res.clone().json() as unknown;
+        return body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string' ? (body as { error: string }).error : '';
+    } catch {
+        return '';
+    }
 }
 
 // Where a logout lands: /login marked so it does not start Face ID by itself

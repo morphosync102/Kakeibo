@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { handleSessionExpired } from "@/lib/client-session";
-import { apiErrorMessage, postAuthJson, type ApiResult } from "@/lib/passkey-client";
+import { handleUnauthorized } from "@/lib/client-session";
+import { apiErrorMessage, isSessionFailure, postAuthJson, type ApiResult } from "@/lib/passkey-client";
 
 // LINE linking of the signed-in user's own kakeibo (design §5.4, U5; only
 // users with a lineOptional source, i.e. Yuki): issue a one-time code, send
@@ -23,8 +23,8 @@ export default function LineLinkPage() {
     const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const handleFailure = useCallback((result: ApiResult) => {
-        if (result.status === 401 && result.data.error === 'Unauthorized') {
-            handleSessionExpired();
+        if (isSessionFailure(result)) {
+            handleUnauthorized(result.data.error);
             return;
         }
         if (result.status === 403) setPhase('unavailable');

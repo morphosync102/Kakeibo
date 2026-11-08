@@ -6,12 +6,13 @@ import { callGasAuth } from '@/lib/gas-auth';
 import { CHALLENGE_COOKIE, challengeCookieOptions, readChallengeToken, sha256Hex } from '@/lib/webauthn-challenge';
 import { labelFromUserAgent, parseRegistrationResponse, verifyRegistration, webauthnConfig } from '@/lib/webauthn';
 import { failureFromGas, inviteTokenFrom, NO_STORE, readJsonObject } from '@/lib/passkey-flow';
+import { ACTIVE_COOKIE, activeCookieOptions, createActiveToken } from '@/lib/active-session';
 
 // Invite registration, step 2 (design §3.3). The challenge cookie must be a
 // purpose=register cookie bound to this invite's token hash; it is deleted by
 // every answer. After verification GAS consumes the invite and adds the
 // passkey atomically (one-time invite, one-time challenge), and the user gets
-// a passkey session (amr=pk).
+// a passkey session (amr=pk) with the app lock's active cookie (§3.12).
 
 export async function POST(request: Request) {
     const env = process.env;
@@ -58,5 +59,6 @@ export async function POST(request: Request) {
     }
     const response = respond({ success: true, userId: user.userId, redirectTo: homePath(user) });
     response.cookies.set(SESSION_COOKIE, await createSession(secret, { ...user, amr: 'pk' }), sessionCookieOptions(env));
+    response.cookies.set(ACTIVE_COOKIE, await createActiveToken(secret, user), activeCookieOptions(env));
     return response;
 }

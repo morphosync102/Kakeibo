@@ -67,26 +67,27 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
 
 ### 認証
 
-設計書`docs/design/2026-11-yuki-and-passkeys.md` §3・§4。ログインはパスキー(WebAuthn、Face ID 等)で行います。
-移行期間(`APP_PASSWORD`設定中)は共有パスワードでのログインも残ります。
+設計書`docs/design/2026-11-yuki-and-passkeys.md` §3・§4。ログインはパスキー(WebAuthn、Face ID 等)だけで行います。
+移行期間の共有パスワードでのログインは**コードで無効化済み**です(設計書§11 U6。Vercelの`APP_PASSWORD`は残っていても何も変わりません)。
 
 - セッション(`kakeibo_session`、v2): `v2.<発行>.<期限>.<nonce>.<userId>.<epoch>.<sources>.<amr>.<署名>`をHMAC-SHA256(`SESSION_SECRET`)で署名し、
-  30日間設定します。sourcesは`+`区切りでホームのsourceが先頭、amrは`pwd`(共有パスワード)/`pk`(パスキー)。
+  30日間設定します。sourcesは`+`区切りでホームのsourceが先頭、amrは`pk`(パスキー)だけを発行します(`pwd`は移行期間の共有パスワード)。
   CookieはHttpOnly・SameSite=Strict・Path=/で、本番ではSecureです。トークンは512文字以下。
 - `readSession`は署名・30日の期限・未来の発行時刻(60秒を超える時計差)・形式(userId・epoch・既知のsourceのみ、重複なし)を検証し、
-  **`APP_PASSWORD`が未設定のときは`amr=pwd`のセッションを無効**にします(パスワード廃止後の移行期間セッションを、画面・APIとも即時に拒否)。
+  **`amr=pwd`のセッションは環境変数に関係なく常に無効**にします(移行期間のパスワードセッションは、次のアクセスで画面は`/login?reason=session`、APIは401)。
   v1(利用者情報の無い旧形式)は無効で、再ログインが必要です。
-- パスワードログイン(`POST /api/auth/verify { password, returnTo? }`): `APP_PASSWORD`と定数時間で比較し、一致したときだけ
-  GAS`authGetAdminUser`(`key`+`authKey`)で管理者行を取得して、その利用者(role=admin)の`amr=pwd`のセッションを発行します。
-  パスワードは共有のため、誰が入力しても管理者のセッションです。応答は`{ success, userId, redirectTo }`。
-  - `APP_PASSWORD`未設定: 404(パスワードログイン廃止)。`SESSION_SECRET`不正: 500。
-  - 管理者行が0件・複数(`AdminNotFound`/`AdminAmbiguous`)、返った利用者の形式不正: 500。GAS失敗・`GAS_AUTH_PROXY_SECRET`等の未設定: 503。
-    いずれもCookieを発行しません。パスワード不一致は401でGASを呼びません。
+- パスワードログイン`POST /api/auth/verify`は廃止済みで、公開パスのまま**常に404 `{ error: 'Not Found' }`**を返します
+  (要求を読まず、Cookieを発行せず、GASも呼びません。開いたままの古いログイン画面に「パスワードでのログインは終了しました」を出させるため残しています)。
+  `APP_PASSWORD`を参照するコードはありません。GASの`authGetAdminUser`はNext.jsから呼ばれなくなりました(GAS側の削除はG5で検討)。
+- **復旧手段**: パスキーを使えなくなった利用者は、GASエディタの`createAdminRecoveryInvite()`(管理者、10分)/`createYukiRecoveryInvite()`(Yuki、24時間)で
+  発行した復旧用の招待リンクから登録し直すだけです(§4「認証の運用」)。パスワードの再設定は非常口にしません。
 - `middleware.ts`は**公開パス以外をすべて保護**します(matcherはNextのビルド資産`_next/static`・`_next/image`以外の全パス)。
   公開パス(完全一致): `/login`、`/invite`、`/api/auth/verify`、`/api/line/webhook`、`/manifest.webmanifest`、`/yahoo-manifest.json`、
   `/yuki-manifest.json`、`/image.png`、`/psyduck.png`、`/icon.png`、`/apple-icon.png`、`/favicon.ico`。公開(配下): `/api/auth/register/`、`/api/auth/login/`、`/_next/`。
   `/loginX`のような類似パスは保護されます。判定は`lib/access.ts`の純粋関数(`decideAccess`)です。
 - セッションが無効なとき: 画面は`/login?returnTo=<パス>&reason=session`へ307、APIは401。無効なCookieは削除します。
+- セッションは有効でもアプリがロック中のとき(下記「アプリロック」): 画面は`/login?returnTo=<パス>&reason=locked`へ307、APIは401 `{ error: 'Locked' }`。
+  セッションCookieは削除しません。
 - 画面の振り分け: パスの先頭(`/yahoo`・`/yuki`、それ以外はmain)のsourceがセッションのsourcesに無ければ、利用者のホーム
   (管理者`/`、Yuki`/yuki`)へ307。APIのsourceはAPI自身が検査します(`/api/expenses`は403)。存在しないパスはログイン後にNextの404。
 - ログイン後の遷移先: `returnTo`が同一オリジンの相対パス(`/`始まりで`//`・`\`・制御文字を含まない、`/login`・`/api`以外)かつ
@@ -99,6 +100,33 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   - ログイン成功時に利用者が変わったとき(`kakeibo_user`の記録が別のuserId、または記録が無い。消去してから記録)
   - ログアウト時
   - パスキーでのログイン成功時・招待での登録完了時も、上と同じく`kakeibo_user`で利用者の変更を判定します。
+  - アプリロック(401 `Locked`、`/login?reason=locked`)では**消去しません**(同じ利用者・同じセッションのため、解除後に再取得しない)。
+    ロック画面で別の利用者がログインした場合は、上のログイン成功時の規則で消去されます。
+
+#### アプリロック(アイドル30分で顔認証を再要求)
+
+設計書§3.12。最後の利用から**30分**(`lib/app-lock.ts`の`APP_LOCK_IDLE_MS`。唯一の定義)を超えて開いた・戻ってきたら、セッションは残したまま顔認証を求めます。
+
+- サーバー: 署名付きCookie`kakeibo_active`(`a1.<期限>.<userId>.<epoch>.<署名>`)。署名鍵は`HMAC-SHA256(SESSION_SECRET, "kakeibo/app-lock-active/v1")`で
+  導出した用途専用の鍵(セッション・チャレンジとは相互に受理されない)。セッションのuserId・epochと一致するときだけ有効(全端末ログアウトのepoch+1でも無効)。
+  HttpOnly・SameSite=Strict・Path=/・本番Secure・有効31分(30分+ping間隔1分のスライド)。
+  - 発行: パスキーログイン(`login/verify`)と招待登録(`register/verify`)の成功時。
+  - 更新: middlewareが、ロックを通過した保護パス(画面・API)への要求ごとに31分先へ更新(Next.jsのリンクprefetchは除く)。
+  - ロック: 有効なセッションで`kakeibo_active`が無い・期限切れ・別のuserId/epoch・改ざんなら、画面は`/login?returnTo=<パス>&reason=locked`、
+    APIは401 `Locked`。source の振り分けより先に判定します(ロック中は何も見せない)。
+  - 対象外: 公開パス(`/login`、`/invite`、`/api/auth/login/*`・`register/*`、`/api/auth/verify`、webhook、manifest・アイコン)と`/api/auth/logout`(ロック中でもこの端末のログアウトは可能)。
+    `/settings/*`(パスキー一覧等)は対象です。
+  - `/login`を開くと`kakeibo_active`を削除します(ロック画面から戻る操作で顔認証を迂回させない)。ログアウトも削除します。
+- クライアント(`components/AppLockGuard.tsx`、ルートlayoutに配置、公開パスでは何もしない):
+  - 操作(pointerdown・keydown・click)の時刻をlocalStorage`kakeibo_last_active`に記録し、1分に1回だけ`GET /api/auth/session`でサーバーのCookieを更新します。
+  - 最後の操作から30分を超えていたら、画面が可視になったとき(iOSのホーム画面アプリはメモリから復帰しても要求を出さないため`visibilitychange`で判定)、
+    bfcacheからの復帰、最初のタップ(そのタップは捕捉段階で止めて編集を始めさせない)、表示中の30秒ごとの確認のいずれかで
+    `/login?returnTo=<今の画面>&reason=locked`へ移ります。ロック画面は自動で顔認証を始め、成功後はサーバーが検証した`returnTo`(元の画面)へ戻ります。
+  - 書き込みキュー(`lib/write-queue.ts`)に未完了の書き込みがあれば、空になってから移ります。サーバーの窓(31分)はクライアントの判定(30分)より
+    ping間隔ぶん長いため、クライアントが「利用中」とみなしている間に送った書き込みがロックで拒否されることはありません。
+  - API(`/api/expenses`の取得・書き込み、`/settings/*`の各API、ping)が401 `Locked`を返したら、localStorageを消さずにロック画面へ移ります。
+  - ログイン成功・招待登録の完了で`kakeibo_last_active`を現在時刻にします(戻った画面がすぐ再ロックされないため)。
+- ストレージが使えない端末ではクライアントの判定が働かず、サーバーの31分でロックします。リリース直後は既存の全端末が一度ロックされます(`kakeibo_active`が無いため)。
 
 #### パスキー(WebAuthn)
 
@@ -120,7 +148,8 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   | `login` | `login/options` | `-` | `login/verify` |
   | `reauth` | `passkeys/add/options` | セッションのuserId | `passkeys/add/reauth` |
   | `add` | `passkeys/add/reauth`(再認証成功後の新しいチャレンジ) | セッションのuserId | `passkeys/add/verify` |
-  | `bootstrap` | `passkeys/add/bootstrap`(パスワード再入力後) | セッションのuserId | `passkeys/add/verify`(`APP_PASSWORD`設定中のみ) |
+
+  移行期間の`bootstrap`(パスワード再入力)は廃止し、発行も受理もしません(旧Cookieは`ChallengeInvalid`)。
 
 - 1回限り: 検証に成功したチャレンジのSHA-256(`challengeHash`、UTF-8のbase64url文字列のSHA-256・小文字16進)をGASが5分記録し、
   2回目は`ChallengeReused`(→ 400 `ChallengeInvalid`)。
@@ -129,36 +158,44 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   | API | 公開 | 処理 | 成功時 |
   | --- | --- | --- | --- |
   | `/api/auth/register/options` `{ token }` | 公開 | 招待トークンのSHA-256だけをGAS`authPeekInvite`へ(トークン自体は送らない)。`excludeCredentials`=その利用者の既存パスキー | `{ options, displayName }` + register Cookie |
-  | `/api/auth/register/verify` `{ token, response }` | 公開 | Cookie(同じ招待)→ 登録検証(challenge・origin・rpID・UV)→ `authConsumeInviteAndAddCredential`(招待消費+追加を原子的に) | `{ success, userId, redirectTo: ホーム }` + `amr=pk`のセッション |
+  | `/api/auth/register/verify` `{ token, response }` | 公開 | Cookie(同じ招待)→ 登録検証(challenge・origin・rpID・UV)→ `authConsumeInviteAndAddCredential`(招待消費+追加を原子的に) | `{ success, userId, redirectTo: ホーム }` + `amr=pk`のセッション + `kakeibo_active` |
   | `/api/auth/login/options` | 公開 | GAS往復なし。`allowCredentials`なし | `{ options }` + login Cookie |
-  | `/api/auth/login/verify` `{ response, returnTo? }` | 公開 | Cookie → userHandle必須 → `authGetCredential` → userHandle・パスキーの所有者・GASの利用者が一致 → 署名・UV・カウンタ検証 → `authRecordCredentialUse` | `{ success, userId, redirectTo }`(returnToはパスワードログインと同じ検証)+ `amr=pk`のセッション |
-  | `/api/auth/passkeys/add/options` | 要セッション | `authListCredentials`(actor)。1件以上: 本人のパスキーだけを`allowCredentials`にした再認証 | `{ mode: 'reauth', options }` + reauth Cookie。0件で`APP_PASSWORD`設定中: `{ mode: 'bootstrap' }`(Cookieなし)。0件で未設定: 403 |
+  | `/api/auth/login/verify` `{ response, returnTo? }` | 公開 | Cookie → userHandle必須 → `authGetCredential` → userHandle・パスキーの所有者・GASの利用者が一致 → 署名・UV・カウンタ検証 → `authRecordCredentialUse` | `{ success, userId, redirectTo }`(returnToは`postLoginPath`で検証)+ `amr=pk`のセッション + `kakeibo_active`(アプリロックの解除) |
+  | `/api/auth/passkeys/add/options` | 要セッション | `authListCredentials`(actor)。1件以上: 本人のパスキーだけを`allowCredentials`にした再認証 | `{ mode: 'reauth', options }` + reauth Cookie。0件: 403 `NotAllowed`(復旧招待で登録し直す) |
   | `/api/auth/passkeys/add/reauth` `{ response }` | 要セッション | reauth Cookie → login/verifyと同じ検証(userHandleとパスキーの所有者がセッションの利用者)→ epochがセッションと一致 → `authListCredentials`(excludeCredentials) | 登録用の**新しい**`{ options }` + add Cookie |
-  | `/api/auth/passkeys/add/bootstrap` `{ password }` | 要セッション | `APP_PASSWORD`未設定は404。定数時間比較(不一致401、GASを呼ばない)→ `authListCredentials`が0件でなければ403 | `{ options }` + bootstrap Cookie |
-  | `/api/auth/passkeys/add/verify` `{ response }` | 要セッション | add/bootstrap Cookie(セッションのuserId)→ 登録検証 → `authAddCredential`(actor、bootstrap時のみ`bootstrap: true`。GASがepoch・role=admin・0件を再確認) | `{ success, credentialCount }`。add(パスキー再認証)ではセッションを`amr=pk`で発行し直す。bootstrapはセッションを変えない |
+  | `/api/auth/passkeys/add/verify` `{ response }` | 要セッション | add Cookie(セッションのuserId)→ 登録検証 → `authAddCredential`(actor。`bootstrap`は送らない。GASがepoch・既存パスキーを確認) | `{ success, credentialCount }` + セッションを`amr=pk`で発行し直す |
+
+  `/api/auth/passkeys/add/bootstrap`(パスワード再入力)はルートごと削除しました。
 
 - エラー: 400 `Invalid request` / `ChallengeInvalid`(Cookieなし・期限切れ・目的違い・別の対象・再利用)/ `VerificationFailed`(登録検証の失敗)、
   401 `VerificationFailed`(認証検証の失敗・userHandle不一致・カウンタ後退・失効済みや存在しないパスキー)、401 `Unauthorized`(セッション無効、GAS`SessionRevoked`。セッションCookieを削除)、
-  403 `NotAllowed`(`NoExistingCredential`・`BootstrapNotAllowed`、bootstrapの条件外)、409 `CredentialExists`、410 `InviteInvalid`、
+  401 `Locked`(セッションは有効でアプリロック中。middleware が返す。Cookieは削除しない)、
+  403 `NotAllowed`(パスキー0件での追加、GASの`NoExistingCredential`・`BootstrapNotAllowed`)、409 `CredentialExists`、410 `InviteInvalid`、
   503 `Service Unavailable`(設定不備・GASの失敗)。`authRecordCredentialUse`の失敗は`ChallengeReused`・`CredentialNotFound`だけがログイン失敗で、
   それ以外(`Busy`等)はログのみでログインを続けます。
 - カウンタ: 保存値・応答値のどちらかが0より大きく、応答値が保存値以下なら拒否(複製された認証器の検出)。iCloudキーチェーン等の同期パスキーは常に0で、0同士は許可。
   GASはカウンタが増えたときだけ更新します。
-- 招待画面`/invite#<token>`: トークンはURLフラグメントから読み、直ちにアドレスバー・履歴から消します(`history.replaceState`)。
-  LINE等のアプリ内ブラウザーでは「Safariで開く」案内を表示します。登録完了後はホーム画面追加とPWA(Safariとログイン状態が別)の案内を表示します。
+- 招待画面`/invite#<token>`: トークンはURLフラグメントから読みます。通常のブラウザーでは直ちにアドレスバー・履歴から消します(`history.replaceState`)。
+  - **LINE等のアプリ内ブラウザー(`isInAppBrowser`)では消しません**。メニューの「Safariで開く」は今のURLをSafariへ渡すため、消すとトークンの無いURLが渡り
+    「招待リンクが正しくありません」になっていました(本番で発生)。登録が完了した時点で、どのブラウザーでも消します。
+  - アプリ内ブラウザーでは「Safariで開く」案内に加え、トークンが無いときのエラー文にも「うまくいかない場合は、届いたリンクを長押しでコピーし、
+    Safari のアドレス欄に貼り付けて開いてください(iMessage で送ってもらうと確実です)」の案内を表示します。
+  - 判断: アプリ内ブラウザーの履歴にトークン付きURLが残りますが、招待は1回限り・24時間(管理者の復旧招待は10分)で、登録に使うと消費されるため許容します。
+  - 登録完了後はホーム画面追加とPWA(Safariとログイン状態が別)の案内を表示します。
 - `/login`: 画面表示時にチャレンジを先に取得し(4分を過ぎたら取り直す。iOSはタップ直後のWebAuthn呼び出しを求めるため)、
   取得できた直後に**1回だけ自動で**パスキー認証(Face ID)を始めます。
   - 自動で始めない条件: ログアウト直後(`logout()`の遷移先`/login?loggedOut=1`。`reason=session`の期限切れ・失効では自動で始める)、
-    WebAuthn非対応のブラウザー、アプリ内ブラウザー(LINE等)、パスワード入力中。
+    WebAuthn非対応のブラウザー、アプリ内ブラウザー(LINE等)。アプリロックのロック画面(`reason=locked`)では自動で始め、
+    「しばらく操作がなかったため、ロックしました」を表示します。
   - 自動の試行が拒否された(iOSでタップなしの呼び出しが`NotAllowedError`になる等)・キャンセルされた場合は、エラー文を出さずに
     「顔認証でログイン」ボタンに戻ります(小さく「ボタンを押すと顔認証が始まります」)。自動の試行は1ページで1回だけで、失敗後に繰り返しません。
     ボタンからの再試行はチャレンジを取り直して行い、失敗理由を表示します。認証後のサーバー検証の失敗(401等)は自動でも表示します。
-  - 成功時はボタンと同じ処理(`kakeibo_user`による消去・記録、サーバーが検証した`redirectTo`へ全画面遷移)。
-  - Conditional UI(`mediation: 'conditional'`、入力欄の自動入力候補にパスキーを出す方式)は使いません。ユーザー名入力欄が無くパスワード欄も
-    廃止予定のため候補を出す場所が無く、iOSでの挙動差もあるためです。
-  パスワード欄は`APP_PASSWORD`設定中だけ表示します(リクエストごとに描画)。
+  - 成功時はボタンと同じ処理(`kakeibo_user`による消去・記録、`kakeibo_last_active`の更新、サーバーが検証した`redirectTo`へ全画面遷移)。
+  - Conditional UI(`mediation: 'conditional'`、入力欄の自動入力候補にパスキーを出す方式)は使いません。ユーザー名入力欄もパスワード欄も
+    無いため候補を出す場所が無く、iOSでの挙動差もあるためです。
+  パスワード欄はありません(U6で削除)。画面下部に「パスキーを使えなくなったときは、管理者に復旧用の招待リンクを依頼してください」を表示します。
 - `/settings/passkeys`(管理画面下部の「パスキー」から)の「パスキーを追加」: 既存パスキーで本人確認 → 新しいパスキーを登録、の2タップ。
-  パスキーが無い管理者は最初の1つだけパスワード再入力で登録できます(GASがrole=adminを確認)。追加後に1件だけなら2つ目の登録を勧めます。
+  パスキーが無い利用者は追加できません(403。復旧招待で登録し直す)。追加後に1件だけなら2つ目の登録を勧めます。
   `/settings/*`は利用者の画面で、sourcesに関係なくログイン中なら開けます(未ログインは`/login`)。
 
 #### 本人のパスキー一覧・失効・全端末ログアウト
@@ -380,7 +417,7 @@ GET・POSTとも、GASにもキャッシュにも触れる前に次の順で検�
 
 | 検査 | 失敗時 |
 | --- | --- |
-| セッション(`readSession`。`APP_PASSWORD`未設定時の`amr=pwd`を含む) | 401 `{ error: 'Unauthorized' }` + Cookie削除 |
+| セッション(`readSession`。`amr=pwd`は常に無効) | 401 `{ error: 'Unauthorized' }` + Cookie削除 |
 | source(省略・`main`・`yahoo`・`yuki`) | 400 `{ error: 'Invalid source' }` |
 | POSTのaction ∈ `WRITE_ACTIONS`(GASの`WRITE_ACTIONS`と同一。テストで一致を検査。`auth*`等は不可) | 400 `{ error: 'Unknown action' }` |
 | source(省略はmain) ∈ セッションのsources | 403 `{ error: 'Forbidden' }` |
@@ -482,7 +519,7 @@ GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定
 
 | action | 用途 | 入力 | 成功時 | 主なエラー |
 | --- | --- | --- | --- | --- |
-| `authGetAdminUser` | パスワードログイン(移行期間)で管理者行を得る | なし | `{ success, user: { userId, displayName, role: "admin", sources, homeSource, epoch } }` | `AdminNotFound`(active な admin が0件)、`AdminAmbiguous`(2件以上)、`AuthUnavailable` |
+| `authGetAdminUser` | パスワードログイン(移行期間)で管理者行を得る。**U6以降Next.jsからは呼ばない**(GAS側の削除はG5で検討) | なし | `{ success, user: { userId, displayName, role: "admin", sources, homeSource, epoch } }` | `AdminNotFound`(active な admin が0件)、`AdminAmbiguous`(2件以上)、`AuthUnavailable` |
 | `authPeekInvite` | 招待の有効性確認(消費しない) | tokenHash | `{ success, purpose, user: { userId, displayName }, credentials: [{ credentialId, transports }] }`(excludeCredentials用) | `InviteInvalid`(存在しない・使用済み・無効化済み・期限切れ・利用者が active でない) |
 | `authConsumeInviteAndAddCredential` | 招待の消費とパスキー追加(原子的) | tokenHash, challengeHash, credential | `{ success, user: { userId, displayName, sources, homeSource, epoch } }` | `InviteInvalid`、`CredentialExists`、`ChallengeReused` |
 | `authAddCredential` | 再認証済みの本人がパスキーを追加 | actor, challengeHash, credential, bootstrap? | `{ success, credentialCount }` | `SessionRevoked`、`NoExistingCredential`(パスキー0件なのに bootstrap なし)、`BootstrapNotAllowed`(bootstrap は role=admin かつ有効なパスキー0件のときだけ)、`CredentialExists`、`ChallengeReused` |
@@ -750,7 +787,7 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 
 ### Vercel環境変数
 
-- `APP_PASSWORD`: 共有パスワード(移行期間のみ)。削除して再デプロイするとパスワードログインが404になり、`amr=pwd`のセッションが無効になる
+- `APP_PASSWORD`: **不要(削除してよい)**。移行期間の共有パスワードで、U6以降どのコードも参照しない(残っていてもパスワードログインは404、`amr=pwd`のセッションは無効)
 - `SESSION_SECRET`: 暗号学的乱数32バイトを64文字の16進数で設定する、サーバー専用の署名鍵。パスワードから生成せず、ソース・ログには保存しません。本番デプロイ前に設定が必要です。ローカル開発でも独立した鍵を環境変数に設定します。
 - `GAS_API_URL`
 - `GAS_PROXY_SECRET`: GASとの共有シークレット(プロキシ認証)。GASの`PROXY_SECRET`と同じ値。
@@ -761,7 +798,7 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `LINE_CHANNEL_ACCESS_TOKEN`(任意): 設定時のみ、webhookで連携コードが一致したときにLINEへ返信する。秘密値(GASの同名Propertyと同じ値)。
   未設定でも連携は動作する(返信しないだけ)
 - `GAS_AUTH_PROXY_SECRET`: GASの`AUTH_PROXY_SECRET`と同じ値(`authKey`)。`/api/expenses`(actor付きの全要求)と`/api/auth/*`(認証系アクション)が送る。
-  未設定の間、`/api/expenses`は503、パスワードログインは503(UIリリース前に設定が必要。設計書§7.2)
+  未設定の間、`/api/expenses`は503(UIリリース前に設定が必要。設計書§7.2)
 
 ### GAS Script Properties
 
@@ -804,6 +841,8 @@ ES256鍵を生成し、attestation(`none`)・assertionを実際に組み立て�
 インストール済みChromeを使用し、`PLAYWRIGHT_CHANNEL`でブラウザーを変更できます。
 未認証・旧形式・改ざん・期限切れCookieの拒否、正規ログイン、認証前にGASを呼ばないことも検証します。
 両sourceの統計・検索・編集・削除・認証と、320×568／390×844／844×390のモーダル操作を検証します。
+**注意(U6)**: `test/auth.browser.mjs`・`test/statistics-search.browser.mjs`はまだパスワードログイン(`/api/auth/verify`)でログインしており、
+U6以降は失敗します。仮想認証器(WebAuthn)版への置き換えが残作業です(設計書§11 U6、IMPROVEMENTS 8-2)。
 
 ### デプロイ(`.github/workflows/deploy.yml`)
 

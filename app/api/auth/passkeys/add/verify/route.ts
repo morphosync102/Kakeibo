@@ -1,18 +1,16 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import {
-    createSession, isPasswordLoginEnabled, isSessionSecretConfigured, readSession, SESSION_COOKIE, sessionCookieOptions,
-} from '@/lib/session';
+import { createSession, isSessionSecretConfigured, readSession, SESSION_COOKIE, sessionCookieOptions } from '@/lib/session';
 import { callGasAuth } from '@/lib/gas-auth';
 import { CHALLENGE_COOKIE, challengeCookieOptions, readChallengeToken, sha256Hex } from '@/lib/webauthn-challenge';
 import { labelFromUserAgent, parseRegistrationResponse, verifyRegistration, webauthnConfig } from '@/lib/webauthn';
 import { failureFromGas, NO_STORE, readJsonObject } from '@/lib/passkey-flow';
 
 // Add a passkey, last step (design §3.3). Accepts only the registration
-// challenge issued after a re-authentication: purpose=add (passkey reauth) or
-// purpose=bootstrap (password re-entry), bound to the session userId; deleted
-// by every answer. GAS authAddCredential checks the actor's epoch, the
-// one-time challenge and (bootstrap) role=admin with zero passkeys.
+// challenge issued after a passkey re-authentication: purpose=add, bound to
+// the session userId; deleted by every answer (the password bootstrap of the
+// migration period was removed in U6). GAS authAddCredential checks the
+// actor's epoch, the one-time challenge and an existing passkey.
 
 export async function POST(request: Request) {
     const env = process.env;
@@ -36,11 +34,8 @@ export async function POST(request: Request) {
     const body = await readJsonObject(request);
     const credentialResponse = parseRegistrationResponse(body?.response);
     if (!credentialResponse) return respond({ error: 'Invalid request' }, 400);
-    const claims = await readChallengeToken(challengeCookie, secret, { purposes: ['add', 'bootstrap'], binding: session.userId });
+    const claims = await readChallengeToken(challengeCookie, secret, { purposes: ['add'], binding: session.userId });
     if (!claims) return respond({ error: 'ChallengeInvalid' }, 400);
-    const bootstrap = claims.purpose === 'bootstrap';
-    // The password bootstrap ends with the migration period
-    if (bootstrap && !isPasswordLoginEnabled(env)) return respond({ error: 'NotAllowed' }, 403);
 
     const credential = await verifyRegistration(config, credentialResponse, claims.challenge, labelFromUserAgent(request.headers.get('user-agent')));
     if (!credential) return respond({ error: 'VerificationFailed' }, 400);
@@ -50,7 +45,6 @@ export async function POST(request: Request) {
         actorEpoch: session.epoch,
         challengeHash: await sha256Hex(claims.challenge),
         credential,
-        ...(bootstrap ? { bootstrap: true } : {}),
     }, { env, fetchImpl: fetch });
     if (!result.ok) {
         const failure = failureFromGas(result.error);
@@ -59,8 +53,7 @@ export async function POST(request: Request) {
     }
     const credentialCount = typeof result.data.credentialCount === 'number' ? result.data.credentialCount : null;
     const response = respond({ success: true, credentialCount });
-    // Re-authenticated with a passkey: the session becomes a passkey session
-    // (survives the removal of APP_PASSWORD). A bootstrap keeps its session.
-    if (!bootstrap) response.cookies.set(SESSION_COOKIE, await createSession(secret, { ...session, amr: 'pk' }), sessionCookieOptions(env));
+    // Re-authenticated with a passkey: a fresh passkey session
+    response.cookies.set(SESSION_COOKIE, await createSession(secret, { ...session, amr: 'pk' }), sessionCookieOptions(env));
     return response;
 }

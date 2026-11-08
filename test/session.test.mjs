@@ -3,12 +3,14 @@ import { createHmac, randomBytes } from 'node:crypto';
 import test from 'node:test';
 import { SESSION_SOURCE_IDS, SESSION_TTL_SECONDS, constantTimeEqual, createSession, readSession } from '../lib/session.ts';
 import { SOURCE_IDS } from '../lib/sources.ts';
+import { legacyPasswordSession } from './helpers/legacy-session.mjs';
 
 // Synthetic values only (no real ids or keys)
 const secret = randomBytes(32).toString('hex');
 const now = 1_800_000_000_000;
-const env = { SESSION_SECRET: secret, APP_PASSWORD: 'synthetic-password' };
-const noPassword = { SESSION_SECRET: secret };
+const env = { SESSION_SECRET: secret };
+// A leftover APP_PASSWORD in the environment changes nothing any more
+const leftoverPassword = { SESSION_SECRET: secret, APP_PASSWORD: 'synthetic-password' };
 const admin = { userId: 'u_admin_synthetic', epoch: 3, sources: ['main', 'yahoo'], homeSource: 'main' };
 const yuki = { userId: 'u_member-synthetic', epoch: 0, sources: ['main', 'yuki'], homeSource: 'yuki' };
 
@@ -25,8 +27,8 @@ test('a v2 session round-trips userId, epoch, sources (home first) and amr', asy
     assert.match(token, /^v2\./);
     assert.deepEqual(await readSession(token, env, now), { userId: admin.userId, epoch: 3, sources: ['main', 'yahoo'], homeSource: 'main', amr: 'pk' });
     // the home source is stored first, whatever order GAS listed them in
-    const member = await readSession(await createSession(secret, { ...yuki, amr: 'pwd' }, now), env, now);
-    assert.deepEqual(member, { userId: yuki.userId, epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki', amr: 'pwd' });
+    const member = await readSession(await createSession(secret, { ...yuki, amr: 'pk' }, now), env, now);
+    assert.deepEqual(member, { userId: yuki.userId, epoch: 0, sources: ['yuki', 'main'], homeSource: 'yuki', amr: 'pk' });
     assert.notEqual(await createSession(secret, { ...admin, amr: 'pk' }, now), token, 'each issuance has a nonce');
 });
 
@@ -39,18 +41,21 @@ test('sessions expire exactly at the server-enforced lifetime; future issuance i
     assert.equal(await readSession(resign(token, p => { p[2] = String(Number(p[2]) + 1); }), env, now), null);
 });
 
-test('without APP_PASSWORD, password sessions are invalid and passkey sessions stay valid', async () => {
-    const pwd = await createSession(secret, { ...admin, amr: 'pwd' }, now);
+test('password sessions (amr=pwd) are always invalid, whatever the environment; passkey sessions stay valid', async () => {
+    const pwd = legacyPasswordSession(secret, admin, now);
     const pk = await createSession(secret, { ...admin, amr: 'pk' }, now);
-    assert.ok(await readSession(pwd, env, now));
-    for (const off of [noPassword, { ...noPassword, APP_PASSWORD: '' }]) {
-        assert.equal(await readSession(pwd, off, now), null);
-        assert.ok(await readSession(pk, off, now));
+    for (const e of [env, leftoverPassword, { ...env, APP_PASSWORD: '' }]) {
+        assert.equal(await readSession(pwd, e, now), null);
+        assert.ok(await readSession(pk, e, now));
     }
+    // the legacy token is well-formed and correctly signed: only amr=pwd refuses it
+    assert.ok(await readSession(resign(pwd, p => { p[7] = 'pk'; }), env, now));
+    // and none can be issued any more
+    await assert.rejects(createSession(secret, { ...admin, amr: 'pwd' }, now));
 });
 
 test('changing amr (pwd -> pk) or any other field breaks the signature', async () => {
-    const token = await createSession(secret, { ...admin, amr: 'pwd' }, now);
+    const token = legacyPasswordSession(secret, admin, now);
     const parts = token.split('.');
     const edits = [
         p => { p[7] = 'pk'; }, // amr
@@ -65,7 +70,7 @@ test('changing amr (pwd -> pk) or any other field breaks the signature', async (
     for (const edit of edits) {
         const copy = [...parts];
         edit(copy);
-        assert.equal(await readSession(copy.join('.'), noPassword, now) ?? await readSession(copy.join('.'), env, now), null, copy.join('.'));
+        assert.equal(await readSession(copy.join('.'), env, now) ?? await readSession(copy.join('.'), leftoverPassword, now), null, copy.join('.'));
     }
 });
 
@@ -102,11 +107,12 @@ test('a token longer than 512 characters is rejected before verification', async
 test('missing, malformed and rotated signing keys reject tokens; issuance validates its input', async () => {
     const token = await createSession(secret, { ...admin, amr: 'pk' }, now);
     for (const key of [undefined, '', 'invalid', randomBytes(31).toString('hex'), randomBytes(32).toString('hex')]) {
-        assert.equal(await readSession(token, { SESSION_SECRET: key, APP_PASSWORD: 'x' }, now), null);
+        assert.equal(await readSession(token, { SESSION_SECRET: key }, now), null);
     }
     for (const key of ['', 'invalid', randomBytes(31).toString('hex')]) await assert.rejects(createSession(key, { ...admin, amr: 'pk' }, now));
     for (const bad of [
         { ...admin, amr: 'otp' },
+        { ...admin, amr: 'pwd' },
         { ...admin, amr: 'pk', userId: 'has.dot' },
         { ...admin, amr: 'pk', userId: '' },
         { ...admin, amr: 'pk', epoch: -1 },

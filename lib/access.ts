@@ -12,7 +12,9 @@ type SessionSources = { sources: readonly string[]; homeSource: Session['homeSou
 const PUBLIC_EXACT: ReadonlySet<string> = new Set([
     '/login',
     '/invite',
-    '/api/auth/verify', // password login (migration period; 404 once APP_PASSWORD is removed)
+    // the removed password login: always 404 (a stale login page gets
+    // "ended", not "wrong password"); it reads nothing and issues nothing
+    '/api/auth/verify',
     '/api/line/webhook',
     // PWA manifests and icons (iOS fetches them without cookies)
     '/manifest.webmanifest',
@@ -47,19 +49,38 @@ export function isAccountPath(pathname: string): boolean {
     return pathname === '/settings' || pathname.startsWith('/settings/');
 }
 
+// Reachable with a session even while the app is locked (§3.12): logging out
+// of this device needs no Face ID.
+const LOCK_EXEMPT_EXACT: ReadonlySet<string> = new Set(['/api/auth/logout']);
+
+export function isLockExemptPath(pathname: string): boolean {
+    return LOCK_EXEMPT_EXACT.has(pathname);
+}
+
+// Requests on these paths (after passing the lock) slide the app lock's
+// active cookie: every protected screen and API except the lock-exempt ones.
+export function refreshesActivity(pathname: string): boolean {
+    return !isPublicPath(pathname) && !isLockExemptPath(pathname);
+}
+
 export type AccessDecision =
     | { kind: 'allow' }
     | { kind: 'unauthorized' } // API without a valid session: 401
     | { kind: 'login'; returnTo: string } // screen without a valid session
+    | { kind: 'locked'; returnTo: string } // screen, valid session, idle too long: /login?reason=locked
+    | { kind: 'lockedApi' } // API, valid session, idle too long: 401 Locked
     | { kind: 'redirect'; location: string }; // screen of a source the user may not open
 
 // Every path is protected except the public ones. Screens belong to the
 // source of their path prefix (lib/sources.ts); an API path's source is in its
-// query/body and is checked by the API itself (403).
-export function decideAccess({ pathname, search, session }: { pathname: string; search: string; session: SessionSources | null }): AccessDecision {
+// query/body and is checked by the API itself (403). active: the app lock's
+// cookie is valid for this session (lib/active-session.ts); without it every
+// protected path but the lock-exempt ones is locked, before anything else.
+export function decideAccess({ pathname, search, session, active }: { pathname: string; search: string; session: SessionSources | null; active: boolean }): AccessDecision {
     if (isPublicPath(pathname)) return { kind: 'allow' };
     const isApi = pathname === '/api' || pathname.startsWith('/api/');
     if (!session) return isApi ? { kind: 'unauthorized' } : { kind: 'login', returnTo: `${pathname}${search}` };
+    if (!active && !isLockExemptPath(pathname)) return isApi ? { kind: 'lockedApi' } : { kind: 'locked', returnTo: `${pathname}${search}` };
     if (isApi || isAccountPath(pathname)) return { kind: 'allow' };
     if (!canOpenSource(session.sources, sourceFromPathname(pathname))) return { kind: 'redirect', location: homePath(session) };
     return { kind: 'allow' };

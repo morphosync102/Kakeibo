@@ -6,13 +6,15 @@ import { CHALLENGE_COOKIE, challengeCookieOptions, LOGIN_BINDING, readChallengeT
 import { parseAuthenticationResponse, webauthnConfig } from '@/lib/webauthn';
 import { NO_STORE, readJsonObject } from '@/lib/passkey-flow';
 import { verifyPasskeyAssertion } from '@/lib/passkey-assertion';
+import { ACTIVE_COOKIE, activeCookieOptions, createActiveToken } from '@/lib/active-session';
 
 // Passkey login, step 2 (design §3.6): purpose=login challenge cookie
 // (deleted by every answer) -> GAS authGetCredential -> signature, origin,
 // rpID, user verification, counter and userHandle == owner ->
-// authRecordCredentialUse (one-time challenge) -> passkey session (amr=pk).
-// The answer is { success, userId, redirectTo } (returnTo validated like the
-// password login; the client uses userId only for its cache housekeeping).
+// authRecordCredentialUse (one-time challenge) -> passkey session (amr=pk)
+// and the app lock's active cookie (§3.12: this login also unlocks).
+// The answer is { success, userId, redirectTo } (returnTo validated by
+// postLoginPath; the client uses userId only for its cache housekeeping).
 
 export async function POST(request: Request) {
     const env = process.env;
@@ -40,5 +42,6 @@ export async function POST(request: Request) {
 
     const response = respond({ success: true, userId: result.user.userId, redirectTo: postLoginPath(body?.returnTo, result.user) });
     response.cookies.set(SESSION_COOKIE, await createSession(secret, { ...result.user, amr: 'pk' }), sessionCookieOptions(env));
+    response.cookies.set(ACTIVE_COOKIE, await createActiveToken(secret, result.user), activeCookieOptions(env));
     return response;
 }
