@@ -15,6 +15,9 @@ export function createFakeGas({ authKey, users, invites = {}, credentials = [] }
         challenges: new Set(),
         bodies: [],
         override: {}, // action -> response (one-shot failure injection)
+        links: new Map(), // userId -> { codeHash, status, lineUserId }
+        destinations: {}, // userId -> LINE userId (stands for the destination property)
+        lineDisplayName: 'Synthetic Name',
     };
     const toUser = u => ({ userId: u.userId, displayName: u.displayName, sources: u.sources, homeSource: u.homeSource, epoch: u.epoch });
     const active = userId => [...state.credentials.values()].filter(c => c.userId === userId && !c.revoked);
@@ -78,7 +81,68 @@ export function createFakeGas({ authKey, users, invites = {}, credentials = [] }
         authListCredentials: b => {
             const u = actor(b);
             if (!u) return { error: 'SessionRevoked' };
-            return { success: true, credentials: active(u.userId).map(c => ({ credentialId: c.credentialId, label: c.label ?? 'パスキー' })) };
+            return {
+                success: true,
+                credentials: active(u.userId).map(c => ({
+                    credentialId: c.credentialId, label: c.label ?? 'パスキー', deviceType: c.deviceType ?? 'multiDevice',
+                    backedUp: c.backedUp ?? true, createdAt: c.createdAt ?? '2026-11-01T00:00:00.000Z', lastUsedAt: c.lastUsedAt ?? '',
+                })),
+            };
+        },
+        authRevokeCredential: b => {
+            const u = actor(b);
+            if (!u) return { error: 'SessionRevoked' };
+            const c = state.credentials.get(b.credentialId);
+            if (!c || c.userId !== u.userId || c.revoked) return { error: 'CredentialNotFound' };
+            c.revoked = true;
+            u.epoch += 1;
+            return { success: true, epoch: u.epoch };
+        },
+        authBumpEpoch: b => {
+            const u = actor(b);
+            if (!u) return { error: 'SessionRevoked' };
+            u.epoch += 1;
+            return { success: true, epoch: u.epoch };
+        },
+        // LINE linking (one link per user; the destination is the actor's lineOptional source)
+        authCreateLineLinkCode: b => {
+            const u = actor(b);
+            if (!u) return { error: 'SessionRevoked' };
+            if (!u.sources.includes('yuki')) return { error: 'Forbidden' };
+            const code = 'ABCDEFGH23';
+            state.links.set(u.userId, { codeHash: sha256(code), status: 'pending', lineUserId: null });
+            return { success: true, code, source: 'yuki', expiresAt: '2026-11-08T00:10:00.000Z' };
+        },
+        authLinkLine: b => {
+            for (const [, link] of state.links) {
+                if (link.status === 'pending' && link.codeHash === sha256(b.code)) {
+                    link.status = 'candidate';
+                    link.lineUserId = b.lineUserId;
+                    return { success: true };
+                }
+            }
+            return { error: 'LinkCodeInvalid' };
+        },
+        authGetLineLinkCandidate: b => {
+            const u = actor(b);
+            if (!u) return { error: 'SessionRevoked' };
+            const link = state.links.get(u.userId);
+            if (!link || (link.status !== 'pending' && link.status !== 'candidate')) return { success: true, status: 'none' };
+            if (link.status === 'pending') return { success: true, status: 'pending', source: 'yuki', expiresAt: '2026-11-08T00:10:00.000Z' };
+            return { success: true, status: 'candidate', source: 'yuki', displayName: state.lineDisplayName, expiresAt: '2026-11-08T00:20:00.000Z' };
+        },
+        authConfirmLineLink: b => {
+            const u = actor(b);
+            if (!u) return { error: 'SessionRevoked' };
+            const link = state.links.get(u.userId);
+            if (!link || link.status !== 'candidate') return { error: 'NoCandidate' };
+            if (b.decision === 'confirm') {
+                link.status = 'confirmed';
+                state.destinations[u.userId] = link.lineUserId;
+            } else {
+                link.status = 'cancelled';
+            }
+            return { success: true, decision: b.decision };
         },
     };
     const upstream = ([, init]) => {

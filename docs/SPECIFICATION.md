@@ -148,9 +148,55 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   LINE等のアプリ内ブラウザーでは「Safariで開く」案内を表示します。登録完了後はホーム画面追加とPWA(Safariとログイン状態が別)の案内を表示します。
 - `/login`: 「パスキーでログイン」(画面表示時にチャレンジを先に取得し、4分を過ぎたら取り直す。iOSはタップ直後のWebAuthn呼び出しを求めるため)。
   パスワード欄は`APP_PASSWORD`設定中だけ表示します(リクエストごとに描画)。
-- `/settings/passkeys`(管理画面下部の「パスキーを追加」から): 既存パスキーで本人確認 → 新しいパスキーを登録、の2タップ。
+- `/settings/passkeys`(管理画面下部の「パスキー」から)の「パスキーを追加」: 既存パスキーで本人確認 → 新しいパスキーを登録、の2タップ。
   パスキーが無い管理者は最初の1つだけパスワード再入力で登録できます(GASがrole=adminを確認)。追加後に1件だけなら2つ目の登録を勧めます。
-  `/settings/*`は利用者の画面で、sourcesに関係なくログイン中なら開けます(未ログインは`/login`)。一覧・失効・全端末ログアウトはU4。
+  `/settings/*`は利用者の画面で、sourcesに関係なくログイン中なら開けます(未ログインは`/login`)。
+
+#### 本人のパスキー一覧・失効・全端末ログアウト
+
+設計書§3.8・§3.9(U4)。`/settings/passkeys`(管理画面下部の「パスキー」)に、追加と同じ画面でまとめています。すべて要セッション・POST・`no-store`で、
+actorは常にセッションから付け、ブラウザーが送った`actorUserId`等は使いません。
+
+| API | GAS | 成功時 | 主なエラー |
+| --- | --- | --- | --- |
+| `/api/auth/passkeys/list` | `authListCredentials` | `{ credentials: [{ credentialId, label, synced, createdAt, lastUsedAt }] }`(公開鍵なし。`synced`はdeviceType=multiDeviceまたはbackedUp) | 401(Cookie削除)、503 |
+| `/api/auth/passkeys/revoke` `{ credentialId }` | `authRevokeCredential`(本人のものだけ。epoch+1) | `{ success, loggedOut: true }` + **この端末のセッションCookieも削除** | 400(形式)、404 `CredentialNotFound`(他人のもの・失効済みを含む)、401、503 |
+| `/api/auth/logout/all` | `authBumpEpoch`(epoch+1) | `{ success, loggedOut: true }` + この端末のセッションCookieを削除 | 401、503 |
+
+- 失効・全端末ログアウトはepochを上げるため、この端末を含む本人の全セッションが無効になります(GASの`SessionRevoked`)。
+  画面は`kakeibo_`のlocalStorageを消去して`/login`へ移ります(`logout()`)。操作は2回タップで確定し、最後の1つの失効は招待が必要になる旨を表示します。
+- 一覧の読み取りはNext.jsキャッシュの5分間、旧Cookieでも返り得ます(§4、設計書§5.7で許容。書き込みは即時に拒否)。
+- パスキーが1つだけのときは2つ目の登録を勧めます。
+- パスキー追加時のYukiのLINEへの通知(設計書§3.9)は未実装です。GASに通知用のアクションが無く(`authAddCredential`も通知しない)、
+  Next.jsはLINEのアクセストークンを常には持たないため、GAS側の対応(例: `authAddCredential`で本人の連携済み宛先へpush)を別タスクとします。
+
+#### LINE連携の画面とwebhook
+
+設計書§5.4(U5)。GAS側の契約は§4「LINE連携(宛先の設定)」。
+
+- 画面`/settings/line`: レジストリで`lineOptional`のsource(現状`yuki`)を持つ利用者だけが使えます(管理画面のリンクは`lineOptional`の家計簿でだけ表示)。
+  「連携コードを発行」→ コード(10文字)を表示 → LINE公式アカウントへ送る → 画面が5秒ごとに状態を確認(最大11分)→ 候補のLINE表示名を表示 →
+  「はい」で確定/「いいえ」で取り消し。発行済みのコードは再表示できません(再発行)。
+- API(要セッション・POST・`no-store`。`lineOptional`のsourceが無い利用者は403でGASを呼ばない。actor・宛先sourceはサーバー/GASが決める):
+
+  | API | GAS | 成功時 |
+  | --- | --- | --- |
+  | `/api/auth/line-link/code` | `authCreateLineLinkCode` | `{ code, expiresAt }`(コードはこの応答だけ。ログに出さない) |
+  | `/api/auth/line-link/status` | `authGetLineLinkCandidate` | `{ status: 'none' }` / `{ status: 'pending', expiresAt }` / `{ status: 'candidate', displayName, expiresAt }`(LINE userIdは返さない) |
+  | `/api/auth/line-link/confirm` `{ decision: 'confirm' \| 'cancel' }` | `authConfirmLineLink` | `{ success, decision }` |
+
+  エラー: 401(Cookie削除)、403 `NotAllowed`(GASの`Forbidden`を含む)、409 `NoCandidate`、503 `ProfileUnavailable`/`Service Unavailable`。
+- webhook`POST /api/line/webhook`(公開。署名が認証):
+  1. `LINE_CHANNEL_SECRET`未設定は503。
+  2. `request.text()`の生本文(256KB以下)に対し、`X-Line-Signature`をHMAC-SHA256(`LINE_CHANNEL_SECRET`)のBase64と定数時間比較。
+     欠落・不一致・本文の改変(JSONとして等価な空白違いを含む)は401で、本文を解析もログ出力もしません。
+  3. 署名が正しければ常に200を即座に返し、その後(`after()`)、1対1トークのテキストメッセージで全体が連携コードの書式
+     (前後の空白を除き大文字化して`[2-9A-HJ-NP-Z]{10}`)のものだけを、1回の配信につき最大5件、GAS`authLinkLine { code, lineUserId }`へ`key`+`authKey`付きで送ります。
+     再送(`deliveryContext.isRedelivery`)・standby・グループ・その他のイベントは無視します。レート制限・失敗回数はGAS側です。
+  4. 照合に成功し、かつVercelに`LINE_CHANNEL_ACCESS_TOKEN`が設定されているときだけ、LINEのreply APIで「アプリで確定してください」と返信します
+     (設計書§5.4の「成功時のみ返信」。未設定なら返信しない)。
+  - ログにはGASのエラーコードと固定文言だけを出し、コード・LINE userId・本文・署名・トークンを出しません。
+  - 運用: LINE Developersでwebhook URLを`https://<本番ドメイン>/api/line/webhook`に変更する(移行前はGASがwebhookを無視するだけ)。
 
 ### レポート
 
@@ -663,6 +709,9 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `WEBAUTHN_RP_ID`: パスキーのRP ID(本番ドメインのホスト名。`vercel.app`は不可で完全なホスト名。ローカルは`localhost`)。秘密値ではない
 - `WEBAUTHN_ORIGIN`: パスキーの期待するorigin(`https://<本番ドメイン>`。ローカルは`http://localhost:3000`)。秘密値ではない。
   `WEBAUTHN_RP_ID`と合わせて未設定・不正の間はパスキーのAPIがすべて503(§2「パスキー」)。RP IDを変えると登録済みのパスキーは使えなくなる
+- `LINE_CHANNEL_SECRET`: LINEチャネルシークレット(webhookの署名検証)。秘密値。未設定の間`/api/line/webhook`は503
+- `LINE_CHANNEL_ACCESS_TOKEN`(任意): 設定時のみ、webhookで連携コードが一致したときにLINEへ返信する。秘密値(GASの同名Propertyと同じ値)。
+  未設定でも連携は動作する(返信しないだけ)
 - `GAS_AUTH_PROXY_SECRET`: GASの`AUTH_PROXY_SECRET`と同じ値(`authKey`)。`/api/expenses`(actor付きの全要求)と`/api/auth/*`(認証系アクション)が送る。
   未設定の間、`/api/expenses`は503、パスワードログインは503(UIリリース前に設定が必要。設計書§7.2)
 

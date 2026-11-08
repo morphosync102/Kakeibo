@@ -47,7 +47,11 @@ export function failureFromGas(error: string): HttpFailure {
         case 'CredentialNotFound': return { status: 401, error: 'VerificationFailed' };
         case 'SessionRevoked': return { status: 401, error: 'Unauthorized', revokeSession: true };
         case 'NoExistingCredential':
-        case 'BootstrapNotAllowed': return { status: 403, error: 'NotAllowed' };
+        case 'BootstrapNotAllowed':
+        case 'Forbidden': return { status: 403, error: 'NotAllowed' };
+        // LINE linking (authCreateLineLinkCode / authGetLineLinkCandidate / authConfirmLineLink)
+        case 'NoCandidate': return { status: 409, error: 'NoCandidate' };
+        case 'ProfileUnavailable': return { status: 503, error: 'ProfileUnavailable' };
         default: return { status: 503, error: 'Service Unavailable' };
     }
 }

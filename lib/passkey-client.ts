@@ -41,6 +41,9 @@ const API_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
     Unauthorized: 'ログインし直してください',
     'Incorrect password': 'パスワードが違います',
     'Not Found': 'パスワードでの確認は終了しました',
+    CredentialNotFound: 'そのパスキーは見つかりません(失効済みの可能性があります)',
+    NoCandidate: '確認待ちの LINE がありません。コードを発行し直してください',
+    ProfileUnavailable: 'LINE の名前を取得できませんでした。時間をおいて再度お試しください',
 });
 
 export const GENERIC_ERROR_MESSAGE = 'うまくいきませんでした。時間をおいて再度お試しください';

@@ -23,6 +23,9 @@ export interface SourceDefinition {
     dashboardTitle: string;
     manageTitle: string;
     theme: SourceTheme;
+    // Its LINE monthly-report destination is set by the user's own LINE
+    // linking (same as GAS SOURCES lineOptional; checked by a test)
+    lineOptional: boolean;
 }
 
 export const SOURCES: Readonly<Record<SourceId, Readonly<SourceDefinition>>> = Object.freeze({
@@ -33,6 +36,7 @@ export const SOURCES: Readonly<Record<SourceId, Readonly<SourceDefinition>>> = O
         dashboardTitle: 'My kakeibo',
         manageTitle: '管理・入力',
         theme: Object.freeze({ dark: false, accent: 'indigo', background: '#ffffff', themeColor: '#ffffff' }),
+        lineOptional: false,
     }),
     yahoo: Object.freeze({
         id: 'yahoo',
@@ -41,6 +45,7 @@ export const SOURCES: Readonly<Record<SourceId, Readonly<SourceDefinition>>> = O
         dashboardTitle: '個人kakeibo',
         manageTitle: '個人kakeibo管理',
         theme: Object.freeze({ dark: true, accent: 'indigo', background: '#020617', themeColor: '#020617' }),
+        lineOptional: false,
     }),
     yuki: Object.freeze({
         id: 'yuki',
@@ -49,10 +54,16 @@ export const SOURCES: Readonly<Record<SourceId, Readonly<SourceDefinition>>> = O
         dashboardTitle: 'Yuki kakeibo',
         manageTitle: 'Yuki kakeibo管理',
         theme: Object.freeze({ dark: false, accent: 'pink', background: '#fdf2f8', themeColor: '#fdf2f8' }),
+        lineOptional: true,
     }),
 } as Record<SourceId, SourceDefinition>);
 
 export const SOURCE_IDS: readonly SourceId[] = Object.freeze(Object.keys(SOURCES) as SourceId[]);
+
+// The user's sources whose LINE destination the user may link (yuki)
+export function lineLinkableSources(sources: readonly string[]): SourceId[] {
+    return sources.filter((id): id is SourceId => isSourceId(id) && SOURCES[id].lineOptional);
+}
 
 export function isSourceId(value: unknown): value is SourceId {
     return typeof value === 'string' && Object.prototype.hasOwnProperty.call(SOURCES, value);

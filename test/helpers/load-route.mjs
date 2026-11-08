@@ -34,6 +34,15 @@ export async function loadRoute(path, { env = {}, cookie, cookies = {}, upstream
         '@/lib/webauthn-challenge': await import('../../lib/webauthn-challenge.ts'),
         '@/lib/passkey-flow': await import('../../lib/passkey-flow.ts'),
         '@/lib/passkey-assertion': await import('../../lib/passkey-assertion.ts'),
+        '@/lib/line-webhook': await import('../../lib/line-webhook.ts'),
+        '@/lib/sources': await import('../../lib/sources.ts'),
+    };
+    // next/server's after(): collected here and run by runAfter() (the
+    // response is returned first, as on Vercel)
+    const afterTasks = [];
+    const nextServer = { ...require('next/server'), after: task => { afterTasks.push(task); } };
+    const runAfter = async () => {
+        while (afterTasks.length > 0) await afterTasks.shift()();
     };
     const log = (...args) => logs.push(args.map(String).join(' '));
     vm.runInNewContext(code, {
@@ -44,6 +53,7 @@ export async function loadRoute(path, { env = {}, cookie, cookies = {}, upstream
         fetch: async (...args) => { calls.push(args); return Response.json(await upstream(args)); },
         require: name => {
             if (name in libs) return libs[name];
+            if (name === 'next/server') return nextServer;
             if (name === 'next/headers') return {
                 cookies: async () => ({
                     get: n => {
@@ -74,7 +84,7 @@ export async function loadRoute(path, { env = {}, cookie, cookies = {}, upstream
             return require(name);
         },
     });
-    return { ...exports, calls, revalidated, store, cacheOptions, cachedCalls, logs };
+    return { ...exports, calls, revalidated, store, cacheOptions, cachedCalls, logs, runAfter, afterTasks };
 }
 
 // The kakeibo_session value a response sets ('' when it deletes the cookie), or

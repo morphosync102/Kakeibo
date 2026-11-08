@@ -260,8 +260,17 @@ export default function ManageView({ source }: ManageViewProps) {
                     href="/settings/passkeys"
                     className={clsx("text-sm underline", isDarkMode ? "text-gray-400" : "text-gray-500")}
                 >
-                    パスキーを追加
+                    パスキー
                 </Link>
+                {/* LINE linking: only kakeibo whose LINE destination the user sets (yuki) */}
+                {sourceInfo.lineOptional && (
+                    <Link
+                        href="/settings/line"
+                        className={clsx("text-sm underline", isDarkMode ? "text-gray-400" : "text-gray-500")}
+                    >
+                        LINE 連携
+                    </Link>
+                )}
                 <button
                     type="button"
                     onClick={() => { void logout(); }}

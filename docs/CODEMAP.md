@@ -19,7 +19,11 @@
 | `app/yuki/layout.tsx` | Yuki 用のメタデータ(`/yuki-manifest.json`)・淡いピンクの背景と themeColor(レジストリの値) |
 | `app/login/page.tsx` / `app/login/LoginForm.tsx` | ログイン画面(リクエストごとに描画し、`APP_PASSWORD` 設定中だけパスワード欄を渡す)。「パスキーでログイン」(チャレンジを先に取得、4分で取り直し)。`reason=session` で `kakeibo_` の localStorage を消去、ログイン成功時(パスキー・パスワードとも)に利用者が変わっていれば消去して `kakeibo_user` を記録、サーバーが検証した `redirectTo` へ全画面遷移 |
 | `app/invite/page.tsx` | 招待リンク `/invite#<token>` からのパスキー登録(公開)。フラグメントを読んで直ちにアドレスバーから消す、アプリ内ブラウザー案内、登録後に `kakeibo_user` 記録とホーム画面追加の案内 |
-| `app/settings/passkeys/page.tsx` | パスキーの追加(要ログイン、source 非依存)。既存パスキーで再認証 → 登録の2タップ。パスキー0件の管理者だけパスワード再入力で最初の1つ(bootstrap) |
+| `app/settings/passkeys/page.tsx` | 本人のパスキー(要ログイン、source 非依存)。一覧・失効・全端末ログアウト(2回タップ、成功で `logout()`)と追加(既存パスキーで再認証 → 登録の2タップ。パスキー0件の管理者だけパスワード再入力で最初の1つ) |
+| `app/settings/line/page.tsx` | LINE 連携(`lineOptional` の source を持つ利用者)。コード発行・表示 → 5秒ごとに状態確認 → 候補の表示名で確定/取消 |
+| `app/api/auth/passkeys/{list,revoke}/route.ts` / `app/api/auth/logout/all/route.ts` | 本人のパスキー一覧(`authListCredentials`)・失効(`authRevokeCredential`)・全端末ログアウト(`authBumpEpoch`)。失効・全端末ログアウトはこの端末の Cookie も削除 |
+| `app/api/auth/line-link/{code,status,confirm}/route.ts` | LINE 連携の本人操作(`authCreateLineLinkCode` / `authGetLineLinkCandidate` / `authConfirmLineLink`)。actor はセッションから、`lineOptional` の source が無ければ 403 |
+| `app/api/line/webhook/route.ts` | LINE webhook(公開)。生本文で署名検証(不正 401)→ 200 を即答 → `after()` で連携コードを `authLinkLine` へ転送(`lib/line-webhook.ts`) |
 | `app/api/auth/register/{options,verify}/route.ts` | 招待登録(公開)。トークンの SHA-256 だけを GAS へ(`authPeekInvite` / `authConsumeInviteAndAddCredential`)、`register` チャレンジCookie、成功で `amr=pk` のセッション |
 | `app/api/auth/login/{options,verify}/route.ts` | パスキーログイン(公開)。options は GAS なし、verify は `lib/passkey-assertion.ts` → `amr=pk` のセッションと検証済み `redirectTo` |
 | `app/api/auth/passkeys/add/{options,reauth,bootstrap,verify}/route.ts` | パスキー追加(要セッション)。options: 再認証用(`reauth`)か bootstrap の判定 / reauth: 本人のパスキーで再認証 → 登録用の新チャレンジ(`add`) / bootstrap: `APP_PASSWORD` 再入力(0件のみ) / verify: `authAddCredential` |
@@ -61,6 +65,7 @@
 | `lib/webauthn.ts` | サーバー(Node のみ): `@simplewebauthn/server` の薄いラッパー。`webauthnConfig`(`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN` のみ、Host から導出しない)、登録・認証オプション生成、検証(例外は握りつぶして null)、応答の形式検査、userHandle → userId、GAS の credential 形式への変換 |
 | `lib/webauthn-challenge.ts` | サーバー: チャレンジCookie `kakeibo_webauthn`(`wa1.`、用途別の導出鍵で署名、5分、purpose と binding を固定)、`sha256Hex`(challengeHash・招待トークンハッシュ) |
 | `lib/passkey-assertion.ts` | サーバー: assertion 検証の共通処理(userHandle → `authGetCredential` → 所有者一致 → 署名・カウンタ → `authRecordCredentialUse`) |
+| `lib/line-webhook.ts` | サーバー: LINE 署名(HMAC-SHA256 Base64、定数時間比較)、連携コードらしきメッセージの抽出、`authLinkLine` への転送と(`LINE_CHANNEL_ACCESS_TOKEN` 設定時のみ)成功時の返信 |
 | `lib/passkey-flow.ts` | サーバー: GAS エラー → HTTP の固定エラー対応表、JSON 本文の読み取り、招待トークンの形式検査 |
 | `lib/passkey-client.ts` | クライアント: `/api/auth/*` への POST、固定文言のエラー表示、招待フラグメントの読み取り、アプリ内ブラウザー判定、チャレンジの鮮度 |
 | `lib/expense-identity.ts` | `isSameExpense()`: 両方に `rowId` があれば rowId 比較、なければ MessageId+日付+店舗+金額の従来比較(旧 localStorage キャッシュ互換) |
@@ -78,6 +83,7 @@
 | `test/expenses-proxy.test.mjs` / `test/client-session.test.mjs` | プロキシの 403・許可リスト・actor/authKey の除去と付与・GAS エラー変換・キャッシュキーとログに秘密が出ないこと / localStorage 消去の条件 |
 | `test/helpers/load-route.mjs` | Route Handler・middleware を VM で実行するテスト用ハーネス(テストではない。`cookies` で `kakeibo_webauthn` 等も渡せる) |
 | `test/passkey-routes.test.mjs` / `test/webauthn-challenge.test.mjs` | パスキーの登録・ログイン・追加(再認証・bootstrap)、チャレンジの再利用・期限・目的違い・対象違い、カウンタ後退、userHandle 不一致、設定不備時の 503 / チャレンジCookie・RP 設定・固定版・クライアント補助 |
+| `test/account-routes.test.mjs` / `test/line-webhook.test.mjs` | 本人のパスキー一覧・失効・全端末ログアウトと LINE 連携 API(本人以外の操作不可、表示名確定フロー)/ webhook の署名(正・誤・欠落・生本文改変)・転送の可否・返信・ログ非出力 |
 | `test/helpers/soft-authenticator.mjs` / `test/helpers/fake-gas-auth.mjs` | ソフトウェア認証器(実 ES256 署名・CBOR attestation)/ 認証 API 契約に従うメモリ上の GAS(テストではない) |
 | `test/auth.browser.mjs` | 本番ビルドを一時起動し、毎回生成した認証情報と架空GASで認証・既存機能E2Eを実行するハーネス。実サービスへ接続しない |
 

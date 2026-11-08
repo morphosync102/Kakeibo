@@ -32,6 +32,7 @@ test('the UI registry lists the same sources, in the same order and with the sam
   for (const id of gas.ids) {
     assert.equal(SOURCES[id].id, id);
     assert.equal(SOURCES[id].label, gas.sources[id].label, `${id} label`);
+    assert.equal(SOURCES[id].lineOptional, gas.sources[id].lineOptional, `${id} lineOptional`);
   }
 });
 
