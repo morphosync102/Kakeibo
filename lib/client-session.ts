@@ -59,6 +59,10 @@ export function handleSessionExpired({ storage = browserStorage(), location = br
     location?.assign(SESSION_EXPIRED_PATH);
 }
 
+// Where a logout lands: /login marked so it does not start Face ID by itself
+// (lib/passkey-client.ts isLoggedOutLanding)
+export const LOGGED_OUT_PATH = '/login?loggedOut=1';
+
 // Logout of this device: delete the cookie (server), clear the cache, go to
 // /login. The cache is cleared and the page left even if the request fails.
 export async function logout({ storage = browserStorage(), location = browserLocation(), fetchImpl }: { storage?: StorageLike; location?: LocationLike; fetchImpl?: typeof fetch } = {}): Promise<void> {
@@ -68,5 +72,5 @@ export async function logout({ storage = browserStorage(), location = browserLoc
         // offline: the cookie stays until it expires, the cache is still cleared
     }
     clearKakeiboStorage(storage);
-    location?.assign('/login');
+    location?.assign(LOGGED_OUT_PATH);
 }

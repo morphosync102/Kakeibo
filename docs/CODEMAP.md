@@ -17,7 +17,7 @@
 | `app/yahoo/layout.tsx` | 個人用のメタデータ・ダーク背景(`BodyBackgroundSetter`) |
 | `app/yuki/page.tsx` ほか `yuki/` 配下 | Yuki 用。同じコンポーネントに `source="yuki"` を渡すだけ |
 | `app/yuki/layout.tsx` | Yuki 用のメタデータ(`/yuki-manifest.json`)・淡いピンクの背景と themeColor(レジストリの値) |
-| `app/login/page.tsx` / `app/login/LoginForm.tsx` | ログイン画面(リクエストごとに描画し、`APP_PASSWORD` 設定中だけパスワード欄を渡す)。「パスキーでログイン」(チャレンジを先に取得、4分で取り直し)。`reason=session` で `kakeibo_` の localStorage を消去、ログイン成功時(パスキー・パスワードとも)に利用者が変わっていれば消去して `kakeibo_user` を記録、サーバーが検証した `redirectTo` へ全画面遷移 |
+| `app/login/page.tsx` / `app/login/LoginForm.tsx` | ログイン画面(リクエストごとに描画し、`APP_PASSWORD` 設定中だけパスワード欄を渡す)。チャレンジを先に取得(4分で取り直し)し、取得直後に1回だけ自動で顔認証(ログアウト直後 `loggedOut=1`・非対応・アプリ内ブラウザー・パスワード入力中は除く。判定は `lib/passkey-client.ts` の `shouldAutoStartPasskey` / `createAutoStartGate`)、失敗・キャンセルは静かに「顔認証でログイン」ボタンへ。`reason=session` で `kakeibo_` の localStorage を消去、ログイン成功時(パスキー・パスワードとも)に利用者が変わっていれば消去して `kakeibo_user` を記録、サーバーが検証した `redirectTo` へ全画面遷移 |
 | `app/invite/page.tsx` | 招待リンク `/invite#<token>` からのパスキー登録(公開)。フラグメントを読んで直ちにアドレスバーから消す、アプリ内ブラウザー案内、登録後に `kakeibo_user` 記録とホーム画面追加の案内 |
 | `app/settings/passkeys/page.tsx` | 本人のパスキー(要ログイン、source 非依存)。一覧・失効・全端末ログアウト(2回タップ、成功で `logout()`)と追加(既存パスキーで再認証 → 登録の2タップ。パスキー0件の管理者だけパスワード再入力で最初の1つ) |
 | `app/settings/line/page.tsx` | LINE 連携(`lineOptional` の source を持つ利用者)。コード発行・表示 → 5秒ごとに状態確認 → 候補の表示名で確定/取消 |

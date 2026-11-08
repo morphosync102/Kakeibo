@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { LOGIN_USER_KEY, SESSION_EXPIRED_PATH, clearKakeiboStorage, handleSessionExpired, logout, rememberLoginUser } from '../lib/client-session.ts';
+import { LOGGED_OUT_PATH, LOGIN_USER_KEY, SESSION_EXPIRED_PATH, clearKakeiboStorage, handleSessionExpired, logout, rememberLoginUser } from '../lib/client-session.ts';
 
 // Map-backed Storage (the Web Storage API subset the module uses)
 function memoryStorage(entries = {}) {
@@ -68,7 +68,9 @@ test('logout deletes the cookie on the server, clears the cache and goes to /log
         assert.equal(calls[0][0], '/api/auth/logout');
         assert.equal(calls[0][1].method, 'POST');
         assert.deepEqual(storage.keys(), ['other_app_key']);
-        assert.deepEqual(visited, ['/login']);
+        // loggedOut=1: /login does not start Face ID by itself right after a logout
+        assert.deepEqual(visited, [LOGGED_OUT_PATH]);
+        assert.equal(LOGGED_OUT_PATH, '/login?loggedOut=1');
     }
 });
 

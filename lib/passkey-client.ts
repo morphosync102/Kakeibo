@@ -80,6 +80,44 @@ export function safeRedirect(value: unknown, fallback = '/'): string {
     return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') && !value.includes('\\') ? value : fallback;
 }
 
+// The failure text of a WebAuthn call: none for the automatic attempt on
+// /login (iOS may refuse a call without a tap, or the user cancelled: the
+// button is simply shown), the usual text for a tapped attempt.
+export function ceremonyFailureMessage(error: unknown, { auto }: { auto: boolean }): string | null {
+    return auto ? null : ceremonyErrorMessage(error);
+}
+
+// /login reached by a logout (lib/client-session.ts LOGGED_OUT_PATH)
+export function isLoggedOutLanding(searchParams: { get(name: string): string | null }): boolean {
+    return searchParams.get('loggedOut') === '1';
+}
+
+// /login starts the passkey by itself only when the challenge is ready, the
+// browser has WebAuthn, it is not an in-app browser, the user did not just
+// log out and is not typing the password.
+export function shouldAutoStartPasskey(c: {
+    optionsReady: boolean;
+    supported: boolean;
+    inAppBrowser: boolean;
+    loggedOut: boolean;
+    typingPassword: boolean;
+}): boolean {
+    return c.optionsReady && c.supported && !c.inAppBrowser && !c.loggedOut && !c.typingPassword;
+}
+
+// At most one automatic attempt per page (never a retry loop)
+export function createAutoStartGate() {
+    const gate = {
+        started: false,
+        tryStart(allowed: boolean): boolean {
+            if (gate.started || !allowed) return false;
+            gate.started = true;
+            return true;
+        },
+    };
+    return gate;
+}
+
 // Options fetched ahead of the tap (iOS wants the WebAuthn call right in the
 // tap handler). The challenge cookie lives 5 minutes; reuse for 4 at most.
 export const OPTIONS_MAX_AGE_MS = 4 * 60 * 1000;

@@ -129,7 +129,7 @@ export default function InvitePage() {
                         <p className="text-gray-700 text-sm font-semibold">登録しました。</p>
                         <ul className="text-gray-600 text-sm list-disc pl-5 space-y-1">
                             <li>Safari の共有ボタンから「ホーム画面に追加」すると、アプリのように使えます。</li>
-                            <li>ホーム画面のアプリは Safari とログイン状態が別です。最初に開いたときに「パスキーでログイン」を押してください。</li>
+                            <li>ホーム画面のアプリは Safari とログイン状態が別です。最初に開いたときに顔認証が始まらなければ「顔認証でログイン」を押してください。</li>
                         </ul>
                         <button
                             type="button"

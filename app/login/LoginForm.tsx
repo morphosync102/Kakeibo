@@ -5,7 +5,10 @@ import { useSearchParams } from "next/navigation";
 import { browserSupportsWebAuthn, startAuthentication } from "@simplewebauthn/browser";
 import type { PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 import { browserStorage, clearKakeiboStorage, rememberLoginUser } from "@/lib/client-session";
-import { apiErrorMessage, ceremonyErrorMessage, isFresh, postAuthJson, safeRedirect } from "@/lib/passkey-client";
+import {
+    apiErrorMessage, ceremonyFailureMessage, createAutoStartGate, isFresh, isInAppBrowser, isLoggedOutLanding,
+    postAuthJson, safeRedirect, shouldAutoStartPasskey,
+} from "@/lib/passkey-client";
 
 type CachedOptions = { options: PublicKeyCredentialRequestOptionsJSON; fetchedAt: number };
 
@@ -20,10 +23,15 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [passkeySupported, setPasskeySupported] = useState(true);
+    const [inAppBrowser, setInAppBrowser] = useState(false);
+    const [optionsReady, setOptionsReady] = useState(false);
+    const [autoFailed, setAutoFailed] = useState(false);
     const optionsRef = useRef<CachedOptions | null>(null);
+    const autoStart = useRef(createAutoStartGate());
     const searchParams = useSearchParams();
     const returnTo = searchParams.get('returnTo');
     const sessionEnded = searchParams.get('reason') === 'session';
+    const loggedOut = isLoggedOutLanding(searchParams);
 
     // Sent here because the session was invalid, expired or revoked: remove
     // every cached list before anything else can show it (design §3.8)
@@ -34,14 +42,18 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
     // Fetch the login challenge ahead of the tap: iOS wants the WebAuthn call
     // directly in the tap handler, without a network wait before it
     useEffect(() => {
+        // browser capabilities are only known on the client
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- read once on arrival
+        setInAppBrowser(isInAppBrowser(navigator.userAgent));
         if (!browserSupportsWebAuthn()) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect -- browser capability is only known on the client
             setPasskeySupported(false);
             return;
         }
         let cancelled = false;
         void fetchLoginOptions().then(options => {
-            if (!cancelled && options) optionsRef.current = options;
+            if (cancelled || !options) return;
+            optionsRef.current = options;
+            setOptionsReady(true);
         });
         return () => { cancelled = true; };
     }, []);
@@ -53,14 +65,21 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
         window.location.assign(safeRedirect(data.redirectTo));
     }, []);
 
-    const loginWithPasskey = async () => {
+    const refetchOptions = useCallback(() => {
+        void fetchLoginOptions().then(options => { optionsRef.current = options; });
+    }, []);
+
+    // auto: the one automatic attempt on arrival. If the browser refuses it
+    // (iOS without a tap) or the user cancels, the button is shown quietly.
+    const loginWithPasskey = useCallback(async ({ auto }: { auto: boolean }) => {
         setIsLoading(true);
         setError(null);
         let cached = isFresh(optionsRef.current?.fetchedAt ?? null) ? optionsRef.current : null;
         optionsRef.current = null; // one challenge per attempt (the server deletes it)
         if (!cached) cached = await fetchLoginOptions();
         if (!cached) {
-            setError('ログインできませんでした。時間をおいて再度お試しください');
+            if (!auto) setError('ログインできませんでした。時間をおいて再度お試しください');
+            setAutoFailed(auto);
             setIsLoading(false);
             return;
         }
@@ -68,9 +87,10 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
         try {
             response = await startAuthentication({ optionsJSON: cached.options });
         } catch (e) {
-            setError(ceremonyErrorMessage(e));
+            setError(ceremonyFailureMessage(e, { auto }));
+            setAutoFailed(auto);
             setIsLoading(false);
-            void fetchLoginOptions().then(options => { optionsRef.current = options; });
+            refetchOptions();
             return;
         }
         const result = await postAuthJson('/api/auth/login/verify', { response, returnTo });
@@ -78,10 +98,28 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
             finishLogin(result.data);
             return; // stay "loading" until the page changes
         }
+        // The user did authenticate: a refusal here is always explained
         setError(result.status === 401 ? 'このパスキーではログインできません' : apiErrorMessage(result));
         setIsLoading(false);
-        void fetchLoginOptions().then(options => { optionsRef.current = options; });
-    };
+        refetchOptions();
+    }, [returnTo, finishLogin, refetchOptions]);
+
+    // Start Face ID by itself once the challenge is ready (at most once per
+    // page; never right after a logout, in an in-app browser or while the
+    // password is being typed)
+    useEffect(() => {
+        const allowed = shouldAutoStartPasskey({
+            optionsReady,
+            supported: passkeySupported,
+            inAppBrowser,
+            loggedOut,
+            typingPassword: input.length > 0,
+        });
+        if (autoStart.current.tryStart(allowed)) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- starts an async ceremony once
+            void loginWithPasskey({ auto: true });
+        }
+    }, [optionsReady, passkeySupported, inAppBrowser, loggedOut, input, loginWithPasskey]);
 
     const performLogin = useCallback(async (password: string) => {
         setIsLoading(true);
@@ -146,13 +184,14 @@ export default function LoginForm({ passwordEnabled }: { passwordEnabled: boolea
 
                 <button
                     type="button"
-                    onClick={() => { void loginWithPasskey(); }}
+                    onClick={() => { void loginWithPasskey({ auto: false }); }}
                     disabled={isLoading || !passkeySupported}
                     className={`w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-semibold shadow-lg transition-all ${isLoading || !passkeySupported ? "opacity-70 cursor-not-allowed" : "active:scale-95"}`}
                 >
-                    {isLoading ? "確認中..." : "パスキーでログイン"}
+                    {isLoading ? "確認中..." : "顔認証でログイン"}
                 </button>
                 {!passkeySupported && <p className="text-gray-500 text-xs mt-2 ml-1">このブラウザはパスキーに対応していません</p>}
+                {autoFailed && !error && !isLoading && <p className="text-gray-400 text-xs mt-2 ml-1">ボタンを押すと顔認証が始まります</p>}
                 {error && <p className="text-red-500 text-xs mt-2 ml-1" role="alert">{error}</p>}
 
                 {passwordEnabled && (
