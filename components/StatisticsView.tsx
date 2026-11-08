@@ -8,6 +8,7 @@ import { aggregateCategories, aggregateExpenses, categoryExpensesByYear, dateKey
 import { getSource, type SourceId } from '@/lib/sources';
 import { ACCENT_CLASSES, pickMode } from '@/lib/theme';
 import BottomNav from './BottomNav';
+import SourceSwitcher from './SourceSwitcher';
 
 const yen = (value: number) => `¥${value.toLocaleString()}`;
 
@@ -44,6 +45,7 @@ export default function StatisticsView({ source }: { source: SourceId }) {
 
     return (
         <main className={clsx('min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))]', pickMode(accent.pageBg, isDarkMode), isDarkMode ? 'text-gray-100' : 'text-gray-900')}>
+            <SourceSwitcher source={source} />
             <div className="max-w-4xl mx-auto p-4 space-y-5">
                 <h1 className="text-xl font-bold">統計</h1>
                 <div className="flex gap-2" aria-label="集計期間">

@@ -54,17 +54,49 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   クラスは`lib/theme.ts`の対応表から取ります。Tailwindが検出できるよう、対応表には完全なクラス名だけを書きます。
 - indigoの対応表は従来main・yahooで使っていたクラスそのもので、main・yahooの見た目は変わりません(テストで固定)。
 - 円グラフのカテゴリ色はテーマに関係なく共通です。
-- `/yuki`配下はログインが必要です。現時点のセッションには利用者情報が無く、GASは`yuki`を利用者の照合(actor)付きの要求に
-  しか返さないため、`/yuki`の一覧は取得エラー(「データの取得に失敗しました」)の表示になります(U2でセッションに利用者を持たせるまで)。
+- `/yuki`配下は`yuki`を持つ利用者(Yuki)だけが開けます(下記「認証」「画面の振り分け」)。
+
+### 家計簿の切替
+
+- sourcesを2つ以上持つ利用者には、各画面(レポート・統計・カレンダー・管理)の上部に家計簿の切替を表示します
+  (Yuki:「Yuki / 家庭用」、管理者:「家庭用 / 個人用」。順序はホームが先)。同じタブのまま対応するルートへ移動します
+  (例:`/yuki/calendar` ⇄ `/calendar`)。
+- 切替の表示は`GET /api/auth/session`(`{ sources, homeSource }`。userId・秘密値は返さない)から作り、表示のみに使います。
+  権限はmiddleware・プロキシ・GASが判定します。
+- 管理画面の下部に「ログアウト」があります(この端末のCookie削除と`kakeibo_`始まりのlocalStorageの消去)。
 
 ### 認証
 
-- `/login`で`APP_PASSWORD`と入力値を照合します。
-- 成功時はHMAC-SHA256で署名した`kakeibo_session`を30日間設定します。CookieはHttpOnly・SameSite=Strict・Path=/で、本番ではSecureです。
-- トークンにはバージョン、発行時刻、有効期限、ランダムnonce、署名を含みます。サーバーで署名と30日間の期限を検証し、不正形式・改ざん・期限切れ・未来の発行時刻（60秒を超える時計差）を拒否します。
-- `middleware.ts`が画面とAPIを保護し、`/api/expenses`のGET・POSTもGASアクセス前に独立して同じ検証を行います。
-- `SESSION_SECRET`が未設定・不正な場合は認証を許可しません。旧形式のCookieは無効になり、再ログインが必要です。
-- セッションはサーバーに保存しない方式です。個別のセッション失効はなく、有効なトークンは期限まで利用可能です。全セッションを失効させるには署名鍵をローテーションします。パスワード変更だけでは既存セッションは失効しません。
+設計書`docs/design/2026-11-yuki-and-passkeys.md` §3.8・§3.10・§4。パスキー(U3)までは、共有パスワードでのログインだけがあります(移行期間)。
+
+- セッション(`kakeibo_session`、v2): `v2.<発行>.<期限>.<nonce>.<userId>.<epoch>.<sources>.<amr>.<署名>`をHMAC-SHA256(`SESSION_SECRET`)で署名し、
+  30日間設定します。sourcesは`+`区切りでホームのsourceが先頭、amrは`pwd`(共有パスワード)/`pk`(パスキー)。
+  CookieはHttpOnly・SameSite=Strict・Path=/で、本番ではSecureです。トークンは512文字以下。
+- `readSession`は署名・30日の期限・未来の発行時刻(60秒を超える時計差)・形式(userId・epoch・既知のsourceのみ、重複なし)を検証し、
+  **`APP_PASSWORD`が未設定のときは`amr=pwd`のセッションを無効**にします(パスワード廃止後の移行期間セッションを、画面・APIとも即時に拒否)。
+  v1(利用者情報の無い旧形式)は無効で、再ログインが必要です。
+- パスワードログイン(`POST /api/auth/verify { password, returnTo? }`): `APP_PASSWORD`と定数時間で比較し、一致したときだけ
+  GAS`authGetAdminUser`(`key`+`authKey`)で管理者行を取得して、その利用者(role=admin)の`amr=pwd`のセッションを発行します。
+  パスワードは共有のため、誰が入力しても管理者のセッションです。応答は`{ success, userId, redirectTo }`。
+  - `APP_PASSWORD`未設定: 404(パスワードログイン廃止)。`SESSION_SECRET`不正: 500。
+  - 管理者行が0件・複数(`AdminNotFound`/`AdminAmbiguous`)、返った利用者の形式不正: 500。GAS失敗・`GAS_AUTH_PROXY_SECRET`等の未設定: 503。
+    いずれもCookieを発行しません。パスワード不一致は401でGASを呼びません。
+- `middleware.ts`は**公開パス以外をすべて保護**します(matcherはNextのビルド資産`_next/static`・`_next/image`以外の全パス)。
+  公開パス(完全一致): `/login`、`/invite`、`/api/auth/verify`、`/api/line/webhook`、`/manifest.webmanifest`、`/yahoo-manifest.json`、
+  `/yuki-manifest.json`、`/image.png`、`/psyduck.png`、`/icon.png`、`/apple-icon.png`、`/favicon.ico`。公開(配下): `/api/auth/register/`、`/api/auth/login/`、`/_next/`。
+  `/loginX`のような類似パスは保護されます。判定は`lib/access.ts`の純粋関数(`decideAccess`)です。
+- セッションが無効なとき: 画面は`/login?returnTo=<パス>&reason=session`へ307、APIは401。無効なCookieは削除します。
+- 画面の振り分け: パスの先頭(`/yahoo`・`/yuki`、それ以外はmain)のsourceがセッションのsourcesに無ければ、利用者のホーム
+  (管理者`/`、Yuki`/yuki`)へ307。APIのsourceはAPI自身が検査します(`/api/expenses`は403)。存在しないパスはログイン後にNextの404。
+- ログイン後の遷移先: `returnTo`が同一オリジンの相対パス(`/`始まりで`//`・`\`・制御文字を含まない、`/login`・`/api`以外)かつ
+  そのsourceをセッションが持つときだけ採用し、それ以外はホーム。サーバーが検証して`redirectTo`で返します。
+- 失効: `epoch`の照合はGAS(§4「利用者の照合」)。プロキシはGASの`SessionRevoked`を401にしてCookieを削除します。
+  全セッションの失効は`SESSION_SECRET`のローテーション。`POST /api/auth/logout`はこの端末のCookieを削除します。
+- 端末内のキャッシュ: localStorageのキーはすべて`kakeibo_`で始まります。次のとき`kakeibo_`始まりをすべて消去します。
+  - `/api/expenses`の取得(`lib/api.ts`)・書き込み(`lib/write-queue.ts`)が401を受けたとき(消去して`/login?reason=session`へ)
+  - `/login?reason=session`を開いたとき
+  - ログイン成功時に利用者が変わったとき(`kakeibo_user`の記録が別のuserId、または記録が無い。消去してから記録)
+  - ログアウト時
 
 ### レポート
 
@@ -233,6 +265,35 @@ GASエディタの`setupAuthSheets()`が作成します(§4「認証API」の運
 ブラウザは直接GASへアクセスせず、Next.jsの`/api/expenses`を経由します。
 Next.jsは`GAS_API_URL`へリクエストを転送します。
 
+### `/api/expenses`(プロキシ)の検査と応答
+
+GET・POSTとも、GASにもキャッシュにも触れる前に次の順で検査します(middlewareとは独立)。
+
+| 検査 | 失敗時 |
+| --- | --- |
+| セッション(`readSession`。`APP_PASSWORD`未設定時の`amr=pwd`を含む) | 401 `{ error: 'Unauthorized' }` + Cookie削除 |
+| source(省略・`main`・`yahoo`・`yuki`) | 400 `{ error: 'Invalid source' }` |
+| POSTのaction ∈ `WRITE_ACTIONS`(GASの`WRITE_ACTIONS`と同一。テストで一致を検査。`auth*`等は不可) | 400 `{ error: 'Unknown action' }` |
+| source(省略はmain) ∈ セッションのsources | 403 `{ error: 'Forbidden' }` |
+| Vercel`GAS_AUTH_PROXY_SECRET`が設定済み | 503(actor無しの要求に落とさない) |
+
+- 転送時、クライアントが送った`key`・`authKey`・`actorUserId`・`actorEpoch`は常に除去し、`key`(`GAS_PROXY_SECRET`、設定時)・
+  `authKey`(`GAS_AUTH_PROXY_SECRET`)・セッションの`actorUserId`/`actorEpoch`を付けます(GETはクエリ、POSTは本文)。
+- GETの`unstable_cache`のキーは`['gas-list', タグ, クエリ]`で、クエリはクライアント由来の値から`fresh`とサーバー専用フィールドを
+  除いたもの(秘密・actorを含まない)。一覧の内容はsourceだけで決まるため、1つのエントリをそのsourceを読める利用者で共有します
+  (権限の検査はキャッシュより前)。epochの失効はキャッシュの5分間、一覧の読み取りに反映されない場合があります(書き込みは即時)。
+- GASのエラーの扱い:
+
+| GASの`error` | GET | POST |
+| --- | --- | --- |
+| `SessionRevoked` | 401 + Cookie削除 | 401 + Cookie削除 |
+| `Forbidden` | 403 | 403 |
+| `AuthUnavailable` | 503 | 503 |
+| その他(`Unauthorized`=設定不備、`Invalid actor`、`Busy`等) | 502 | `{ error }`をそのまま返す(200) |
+
+  いずれもキャッシュせず、上の3つではタグの無効化もしません。ログは秘密値(`GAS_PROXY_SECRET`・`GAS_AUTH_PROXY_SECRET`)を伏せます。
+- クライアントは401を受けると`kakeibo_`始まりのlocalStorageを消去して`/login?reason=session`へ移動します(§2「認証」)。
+
 ### プロキシ認証(GAS)
 
 GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシとGASで共有シークレットを照合します。
@@ -260,7 +321,7 @@ GAS Web AppはURLを知っていれば誰でも呼べるため、プロキシと
 
 設計書`docs/design/2026-11-yuki-and-passkeys.md` §5.7。プロキシはセッションから得た利用者を
 GETクエリ/POST本文の`actorUserId`(文字列)と`actorEpoch`(0以上の整数。クエリでは数字列)としてGASへ渡します
-(クライアント送信分は除去。プロキシ側はU2で実装予定。現行UI・現行プロキシは送りません)。
+(クライアント送信分は除去。プロキシはすべての要求にセッションのactorを付けます。§4「`/api/expenses`(プロキシ)の検査と応答」)。
 actorを付けるときは、`key`とは別の秘密`authKey`(Vercel`GAS_AUTH_PROXY_SECRET` = GAS`AUTH_PROXY_SECRET`)も付けます。
 現行の`/api/expenses`は本文をそのまま転送して`key`を付け直すため、`key`だけではブラウザが自称したactorと区別できないからです。
 
@@ -299,7 +360,8 @@ GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定
 - 認証系アクションは`key`(`PROXY_SECRET`)に加えて本文の`authKey`が`AUTH_PROXY_SECRET`と一致する必要があります(定数時間比較)。
   `PROXY_SECRET`・`AUTH_PROXY_SECRET`のどちらかが未設定、または`authKey`の欠落・誤りは`{ "error": "Unauthorized" }`で、
   何も読み書きしません(移行期間の素通しを適用しない)。`authKey`は新しい`/api/auth/*`だけが送り、`/api/expenses`経由では
-  届きません(U2で`/api/expenses`のPOSTを`WRITE_ACTIONS`の許可リストに限定し、クライアント由来の`authKey`等を除去)。
+  届きません(`/api/expenses`のPOSTは`WRITE_ACTIONS`の許可リストに限定され、クライアント由来の`authKey`等は除去される)。
+  Next.js側の呼び出しは`lib/gas-auth.ts`の`callGasAuth`(`key`+`authKey`を付けてPOST)に集約します。
   2つの値が同じでも`key`は`authKey`として扱いません(`setupAuthSheets()`が同値・未設定を警告)。値はログに出しません。
 - `source`は見ません(データ用のsource検証・actor照合より前に分岐)。
 - 書き込みはScript Lock内で状態を読み直してから行い、取得できなければ`{ "error": "Busy" }`です。`Auth_Users`を書き換えたら
@@ -540,10 +602,12 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 
 ### Vercel環境変数
 
-- `APP_PASSWORD`
+- `APP_PASSWORD`: 共有パスワード(移行期間のみ)。削除して再デプロイするとパスワードログインが404になり、`amr=pwd`のセッションが無効になる
 - `SESSION_SECRET`: 暗号学的乱数32バイトを64文字の16進数で設定する、サーバー専用の署名鍵。パスワードから生成せず、ソース・ログには保存しません。本番デプロイ前に設定が必要です。ローカル開発でも独立した鍵を環境変数に設定します。
 - `GAS_API_URL`
 - `GAS_PROXY_SECRET`: GASとの共有シークレット(プロキシ認証)。GASの`PROXY_SECRET`と同じ値。
+- `GAS_AUTH_PROXY_SECRET`: GASの`AUTH_PROXY_SECRET`と同じ値(`authKey`)。`/api/expenses`(actor付きの全要求)と`/api/auth/*`(認証系アクション)が送る。
+  未設定の間、`/api/expenses`は503、パスワードログインは503(UIリリース前に設定が必要。設計書§7.2)
 
 ### GAS Script Properties
 

@@ -17,12 +17,17 @@ export async function runSecurityAndFeatureChecks() {
     // Per-run credentials stay in memory. The app cannot reach the live GAS URL.
     const password = randomBytes(24).toString('hex');
     const secret = randomBytes(32).toString('hex');
+    const authKey = randomBytes(24).toString('hex');
+    const admin = { userId: 'u_admin_synthetic', displayName: 'Synthetic admin', role: 'admin', sources: ['main', 'yahoo'], homeSource: 'main', epoch: 0 };
     let upstreamCalls = 0;
-    const upstream = createServer((request, response) => {
+    const upstream = createServer(async (request, response) => {
         upstreamCalls++;
-        request.resume();
+        let body = '';
+        for await (const chunk of request) body += chunk;
         response.setHeader('Content-Type', 'application/json');
-        response.end(JSON.stringify(request.method === 'POST' ? { success: true } : []));
+        if (request.method !== 'POST') return response.end('[]');
+        const action = JSON.parse(body || '{}').action;
+        response.end(JSON.stringify(action === 'authGetAdminUser' ? { success: true, user: admin } : { success: true }));
     });
     const upstreamPort = await listen(upstream);
     const reserve = createServer();
@@ -31,7 +36,7 @@ export async function runSecurityAndFeatureChecks() {
     const baseURL = `http://127.0.0.1:${port}`;
     const server = spawn(process.execPath, ['node_modules/next/dist/bin/next', 'start', '--hostname', '127.0.0.1', '--port', String(port)], {
         cwd: fileURLToPath(new URL('..', import.meta.url)),
-        env: { ...process.env, APP_PASSWORD: password, SESSION_SECRET: secret, GAS_API_URL: `http://127.0.0.1:${upstreamPort}`, NODE_ENV: 'production' },
+        env: { ...process.env, APP_PASSWORD: password, SESSION_SECRET: secret, GAS_AUTH_PROXY_SECRET: authKey, GAS_API_URL: `http://127.0.0.1:${upstreamPort}`, NODE_ENV: 'production' },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     let startupLog = '';
@@ -46,8 +51,8 @@ export async function runSecurityAndFeatureChecks() {
             await new Promise(resolve => setTimeout(resolve, 200));
         }
         assert.ok(ready, 'local server starts');
-        const expired = await createSession(secret, Date.now() - (SESSION_TTL_SECONDS + 1) * 1000);
-        const valid = await createSession(secret);
+        const expired = await createSession(secret, { ...admin, amr: 'pk' }, Date.now() - (SESSION_TTL_SECONDS + 1) * 1000);
+        const valid = await createSession(secret, { ...admin, amr: 'pk' });
         const tampered = valid.slice(0, -1) + (valid.endsWith('a') ? 'b' : 'a');
         for (const token of ['', 'authenticated', 'synthetic-test', expired, tampered]) {
             const headers = token ? { Cookie: `kakeibo_session=${token}` } : {};
@@ -78,7 +83,7 @@ export async function runSecurityAndFeatureChecks() {
         assert.equal((await fetch(`${baseURL}/statistics`, { headers: { Cookie: cookie }, redirect: 'manual' })).status, 200);
         assert.equal((await fetch(`${baseURL}/api/expenses`, { headers: { Cookie: cookie } })).status, 200);
         assert.equal((await fetch(`${baseURL}/api/expenses`, { method: 'POST', headers: { Cookie: cookie }, body: JSON.stringify({ action: 'addTransaction', source: 'main' }) })).status, 200);
-        assert.equal(upstreamCalls, 2, 'authenticated requests reach only local fake upstream');
+        assert.equal(upstreamCalls, 3, 'login (authGetAdminUser) and authenticated requests reach only local fake upstream');
         console.log('PASS security: 40 page redirects, 10 API rejections, zero unauthorized upstream calls, real login and signed-cookie API access');
         const { chromium } = await import('playwright');
         browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || 'chrome' });

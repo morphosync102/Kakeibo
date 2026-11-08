@@ -1,6 +1,8 @@
 'use client';
 
 import BottomNav from '@/components/BottomNav';
+import SourceSwitcher from '@/components/SourceSwitcher';
+import { logout } from '@/lib/client-session';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { PlusCircle, RefreshCw, Check } from 'lucide-react';
@@ -116,6 +118,7 @@ export default function ManageView({ source }: ManageViewProps) {
                     {sourceInfo.manageTitle}
                 </h1>
             </header >
+            <SourceSwitcher source={source} />
 
             {/* Tabs */}
             < div className="px-4 py-4" >
@@ -250,6 +253,16 @@ export default function ManageView({ source }: ManageViewProps) {
                 }
 
             </div >
+            {/* Logout of this device: deletes the cookie and every kakeibo_ cache */}
+            <div className="px-4 pb-6 flex justify-center">
+                <button
+                    type="button"
+                    onClick={() => { void logout(); }}
+                    className={clsx("text-sm underline", isDarkMode ? "text-gray-400" : "text-gray-500")}
+                >
+                    ログアウト
+                </button>
+            </div>
             <BottomNav />
         </main >
     );

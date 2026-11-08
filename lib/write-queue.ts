@@ -7,7 +7,9 @@
 // Every POST therefore runs through one Promise chain, one at a time.
 //
 // Keep this module free of `@/` imports: tests load it directly with Node's
-// TypeScript type stripping.
+// TypeScript type stripping (relative imports carry the .ts extension).
+
+import { handleSessionExpired } from './client-session.ts';
 
 type PendingListener = (pending: number) => void;
 
@@ -129,6 +131,12 @@ export function postWrite(
                 keepalive: true,
                 signal: AbortSignal.timeout(timeoutMs),
             });
+            // Invalid, expired or revoked session: nothing was written. Clear
+            // the cached lists and go to /login.
+            if (res.status === 401) {
+                handleSessionExpired();
+                throw new Error('Unauthorized');
+            }
             data = await res.json() as WriteResult;
         } catch (e) {
             if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) {

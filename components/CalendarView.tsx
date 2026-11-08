@@ -9,6 +9,7 @@ import { clsx } from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import BottomNav from '@/components/BottomNav';
+import SourceSwitcher from '@/components/SourceSwitcher';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import ExpenseSearch from './ExpenseSearch';
 import { Expense } from '@/lib/api';
@@ -156,6 +157,7 @@ export default function CalendarView({ source }: CalendarViewProps) {
         <main
             className={clsx("min-h-screen pb-[calc(7rem+env(safe-area-inset-bottom))] overflow-x-hidden transition-colors", bgColor)}
         >
+            <SourceSwitcher source={source} />
             <div className={clsx('flex gap-2 p-4', textColor)}>
                 <button aria-pressed={view === 'calendar'} onClick={() => setView('calendar')} className={clsx('flex-1 rounded-xl py-3', view === 'calendar' && accent.segmentActive)}>カレンダー</button>
                 <button aria-pressed={view === 'search'} onClick={() => setView('search')} className={clsx('flex-1 rounded-xl py-3', view === 'search' && accent.segmentActive)}>支出検索</button>

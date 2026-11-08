@@ -1,42 +1,40 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { SESSION_COOKIE, verifySession } from '@/lib/session';
+import { readSession, SESSION_COOKIE, sessionCookieOptions } from '@/lib/session';
+import { decideAccess } from '@/lib/access';
 
+// Every path is protected except the public ones (lib/access.ts), so a new
+// route cannot be left open by forgetting to list it. Screens of a source the
+// user may not open redirect to the user's home; APIs only need a session here
+// and check their source themselves (/api/expenses: 403).
 export async function middleware(request: NextRequest) {
+    const cookie = request.cookies.get(SESSION_COOKIE)?.value;
+    const { pathname, search } = request.nextUrl;
+    // readSession also rejects amr=pwd sessions once APP_PASSWORD is removed.
+    // Variables are read one by one (Edge runtime: no reliance on the whole process.env object).
+    const session = await readSession(cookie, { SESSION_SECRET: process.env.SESSION_SECRET, APP_PASSWORD: process.env.APP_PASSWORD });
+    const decision = decideAccess({ pathname, search, session });
 
-    // Protected Routes
-    const protectedPaths = ['/', '/statistics', '/calendar', '/manage', '/api/expenses', '/yahoo', '/yuki'];
+    if (decision.kind === 'allow') return NextResponse.next();
+    if (decision.kind === 'redirect') return NextResponse.redirect(new URL(decision.location, request.url));
 
-    // Check if current path matches any protected path
-    const isProtected = protectedPaths.some(path =>
-        request.nextUrl.pathname === path || request.nextUrl.pathname.startsWith(path + '/')
-    );
-
-    if (isProtected && !await verifySession(request.cookies.get(SESSION_COOKIE)?.value, process.env.SESSION_SECRET)) {
-        // Redirect to login if accessing protected route without session
-        // For API routes, ideally return 401, but redirect handles unified logic for now
-        if (request.nextUrl.pathname.startsWith('/api/')) {
-            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-        }
-        const loginUrl = new URL('/login', request.url);
-        loginUrl.searchParams.set('returnTo', request.nextUrl.pathname);
-        return NextResponse.redirect(loginUrl);
-    }
-
-    return NextResponse.next();
+    const response = decision.kind === 'unauthorized'
+        ? NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } })
+        : (() => {
+            // reason=session: /login clears the kakeibo_ localStorage before
+            // any screen can show another user's cached data
+            const loginUrl = new URL('/login', request.url);
+            loginUrl.searchParams.set('returnTo', decision.returnTo);
+            loginUrl.searchParams.set('reason', 'session');
+            return NextResponse.redirect(loginUrl);
+        })();
+    // An invalid (tampered, expired, v1, revoked password) cookie is deleted
+    if (cookie !== undefined) response.cookies.set(SESSION_COOKIE, '', sessionCookieOptions({ NODE_ENV: process.env.NODE_ENV }, 0));
+    return response;
 }
 
 export const config = {
-    matcher: [
-        /*
-         * Match all request paths except for the ones starting with:
-         * - api/auth (auth routes)
-         * - _next/static (static files)
-         * - _next/image (image optimization files)
-         * - favicon.ico (favicon file)
-         * - login (login page)
-         * - image.png (app icon)
-         */
-        '/((?!api/auth|_next/static|_next/image|favicon.ico|login|image.png).*)',
-    ],
+    // Everything except Next's build assets; public paths are decided by
+    // isPublicPath (exact paths, not prefixes such as "login").
+    matcher: ['/((?!_next/static|_next/image).*)'],
 };

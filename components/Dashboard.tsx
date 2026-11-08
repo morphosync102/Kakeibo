@@ -8,6 +8,7 @@ import { clsx } from 'clsx';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { toast } from 'sonner';
 import BottomNav from '@/components/BottomNav';
+import SourceSwitcher from '@/components/SourceSwitcher';
 import ExpenseDetailModal from './ExpenseDetailModal';
 import { Expense } from '@/lib/api';
 import { EXPENSE_CATEGORIES as CATEGORIES } from '@/lib/categories';
@@ -181,6 +182,7 @@ export default function Dashboard({ source }: DashboardProps) {
                     <RefreshCw size={20} className={clsx("loading-icon", loading && "animate-spin", isDarkMode ? "text-gray-400" : "text-gray-600")} />
                 </button>
             </header>
+            <SourceSwitcher source={source} />
 
             {/* Swipeable Dashboard Cards Container */}
             <div className="pt-2 pb-2">

@@ -84,3 +84,13 @@ const TAB_PATHS: Readonly<Record<SourceTab, string>> = Object.freeze({
 export function sourceHref(id: SourceId, tab: SourceTab): string {
     return `${getSource(id).basePath}${TAB_PATHS[tab]}` || '/';
 }
+
+// The tab of a page path (e.g. '/yuki/calendar' -> 'calendar'); 'home' for
+// anything else. Used to keep the tab when switching kakeibo.
+export function tabFromPathname(pathname: string): SourceTab {
+    const rest = pathname.slice(getSource(sourceFromPathname(pathname)).basePath.length);
+    for (const tab of Object.keys(TAB_PATHS) as SourceTab[]) {
+        if (tab !== 'home' && (rest === TAB_PATHS[tab] || rest.startsWith(`${TAB_PATHS[tab]}/`))) return tab;
+    }
+    return 'home';
+}

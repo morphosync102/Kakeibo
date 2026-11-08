@@ -212,6 +212,6 @@ test('the yuki layout and PWA manifest use the light pink theme, start at /yuki 
   for (const icon of manifest.icons) assert.ok(fs.existsSync(join(root, 'public', icon.src)), icon.src);
 });
 
-test('the /yuki pages are protected by the login middleware', () => {
-  assert.match(read('middleware.ts'), /protectedPaths = \[[^\]]*'\/yuki'/);
+test('the /yuki pages are protected by the login middleware (everything but public paths; see access.test.mjs)', () => {
+  assert.match(read('middleware.ts'), /decideAccess\(/);
 });

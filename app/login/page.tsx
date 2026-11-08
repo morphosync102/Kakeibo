@@ -1,43 +1,59 @@
 'use client';
 
 import { useState, useEffect, FormEvent, Suspense, useCallback } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import { browserStorage, clearKakeiboStorage, rememberLoginUser } from "@/lib/client-session";
 
 function LoginContent() {
     const [input, setInput] = useState("");
     const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState(false);
-    const router = useRouter();
+    const [error, setError] = useState<string | null>(null);
     const searchParams = useSearchParams();
     const returnTo = searchParams.get('returnTo');
+    const sessionEnded = searchParams.get('reason') === 'session';
+
+    // Sent here because the session was invalid, expired or revoked: remove
+    // every cached list before anything else can show it (design §3.8)
+    useEffect(() => {
+        if (sessionEnded) clearKakeiboStorage();
+    }, [sessionEnded]);
 
     const performLogin = useCallback(async (password: string) => {
         setIsLoading(true);
-        setError(false);
+        setError(null);
 
         try {
+            // returnTo is validated by the server (same-origin path of a
+            // kakeibo this user may open); redirectTo is the result
             const res = await fetch("/api/auth/verify", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ password }),
+                body: JSON.stringify({ password, returnTo }),
             });
 
             if (res.ok) {
-                router.push(returnTo || '/');
-                router.refresh();
+                const data = await res.json() as { userId?: unknown; redirectTo?: unknown };
+                // Another (or an unknown) previous user: clear the cache first
+                if (typeof data.userId === 'string') rememberLoginUser(browserStorage(), data.userId);
+                const target = typeof data.redirectTo === 'string' && data.redirectTo.startsWith('/') && !data.redirectTo.startsWith('//') ? data.redirectTo : '/';
+                // Full navigation: no screen of the previous session survives.
+                // Stay "loading" so the autofill submit does not fire again.
+                window.location.assign(target);
+                return;
             } else {
-                setError(true);
+                setError(res.status === 404
+                    ? 'パスワードでのログインは終了しました'
+                    : res.status === 401 ? 'Incorrect password' : 'ログインできませんでした。時間をおいて再度お試しください');
                 // Only clear input if explicitly failed, but for auto-submit loop safety,
                 // we might want to keep it? No, clear is standard.
                 // However, on auto-submit failure, clearing stops the loop.
                 setInput("");
             }
         } catch {
-            setError(true);
-        } finally {
-            setIsLoading(false);
+            setError('ログインできませんでした。時間をおいて再度お試しください');
         }
-    }, [returnTo, router]);
+        setIsLoading(false);
+    }, [returnTo]);
 
     const handleLogin = (e: FormEvent) => {
         e.preventDefault();
@@ -81,13 +97,13 @@ function LoginContent() {
                             value={input}
                             onChange={(e) => {
                                 setInput(e.target.value);
-                                setError(false);
+                                setError(null);
                             }}
                             className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 outline-none transition-all text-gray-800 placeholder-gray-400"
                             placeholder="Password"
                             disabled={isLoading}
                         />
-                        {error && <p className="text-red-500 text-xs mt-2 ml-1">Incorrect password</p>}
+                        {error && <p className="text-red-500 text-xs mt-2 ml-1">{error}</p>}
                     </div>
 
                     <button
