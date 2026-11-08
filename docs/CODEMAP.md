@@ -17,7 +17,12 @@
 | `app/yahoo/layout.tsx` | 個人用のメタデータ・ダーク背景(`BodyBackgroundSetter`) |
 | `app/yuki/page.tsx` ほか `yuki/` 配下 | Yuki 用。同じコンポーネントに `source="yuki"` を渡すだけ |
 | `app/yuki/layout.tsx` | Yuki 用のメタデータ(`/yuki-manifest.json`)・淡いピンクの背景と themeColor(レジストリの値) |
-| `app/login/page.tsx` | パスワード認証画面。`reason=session` で `kakeibo_` の localStorage を消去、ログイン成功時に利用者が変わっていれば消去して `kakeibo_user` を記録、サーバーが検証した `redirectTo` へ全画面遷移 |
+| `app/login/page.tsx` / `app/login/LoginForm.tsx` | ログイン画面(リクエストごとに描画し、`APP_PASSWORD` 設定中だけパスワード欄を渡す)。「パスキーでログイン」(チャレンジを先に取得、4分で取り直し)。`reason=session` で `kakeibo_` の localStorage を消去、ログイン成功時(パスキー・パスワードとも)に利用者が変わっていれば消去して `kakeibo_user` を記録、サーバーが検証した `redirectTo` へ全画面遷移 |
+| `app/invite/page.tsx` | 招待リンク `/invite#<token>` からのパスキー登録(公開)。フラグメントを読んで直ちにアドレスバーから消す、アプリ内ブラウザー案内、登録後に `kakeibo_user` 記録とホーム画面追加の案内 |
+| `app/settings/passkeys/page.tsx` | パスキーの追加(要ログイン、source 非依存)。既存パスキーで再認証 → 登録の2タップ。パスキー0件の管理者だけパスワード再入力で最初の1つ(bootstrap) |
+| `app/api/auth/register/{options,verify}/route.ts` | 招待登録(公開)。トークンの SHA-256 だけを GAS へ(`authPeekInvite` / `authConsumeInviteAndAddCredential`)、`register` チャレンジCookie、成功で `amr=pk` のセッション |
+| `app/api/auth/login/{options,verify}/route.ts` | パスキーログイン(公開)。options は GAS なし、verify は `lib/passkey-assertion.ts` → `amr=pk` のセッションと検証済み `redirectTo` |
+| `app/api/auth/passkeys/add/{options,reauth,bootstrap,verify}/route.ts` | パスキー追加(要セッション)。options: 再認証用(`reauth`)か bootstrap の判定 / reauth: 本人のパスキーで再認証 → 登録用の新チャレンジ(`add`) / bootstrap: `APP_PASSWORD` 再入力(0件のみ) / verify: `authAddCredential` |
 | `app/api/expenses/route.ts` | **GASへの唯一のデータ用プロキシ**。GET・POSTとも `readSession` を独立検証(401+Cookie削除)→ source 検証(400)→ POST は `WRITE_ACTIONS` のみ(400)→ source ∈ セッションの sources(403)→ `GAS_AUTH_PROXY_SECRET` 必須(503)。クライアント由来の `key`/`authKey`/`actor*` を除去し、`key`・`authKey`・セッションの actor を付与。GAS の `SessionRevoked`→401+Cookie削除、`Forbidden`→403、`AuthUnavailable`→503。GETは `unstable_cache`(キーはタグ+クエリのみ、5分、配列以外は502でキャッシュしない。`fresh=1` は迂回)、`maxDuration = 60`、POSTは転送＋関連タグ無効化 |
 | `app/api/auth/verify/route.ts` | パスワードログイン(移行期間)。`APP_PASSWORD` 未設定で404、定数時間比較、一致時のみ GAS `authGetAdminUser` で管理者行を得て `amr=pwd` の v2 セッション発行(0件・複数・失敗では発行しない)。`returnTo` を検証して `redirectTo` を返す |
 | `app/api/auth/session/route.ts` | 家計簿切替の表示用 `{ sources, homeSource }`(userId・秘密なし) |
@@ -50,9 +55,14 @@
 | `lib/categories.ts` | 支出・収入カテゴリ定数の正本(全コンポーネントがここから import) |
 | `lib/expense-analysis.ts` | 純粋関数：日付の厳密な正規化、期間集計・ゼロ補完・累積値、支出検索条件の検証・AND絞り込み・合計、カテゴリ候補 |
 | `middleware.ts` | 公開パス以外をすべて保護(判定は `lib/access.ts`)。無効なセッションは API 401、画面は `/login?returnTo=&reason=session`(Cookie削除)。権限外 source の画面はホームへ |
-| `lib/access.ts` | 純粋関数: 公開パス(`isPublicPath`、完全一致+`/`終わりの接頭辞)、`decideAccess`(middleware の判定)、`homePath`、`safeReturnTo`/`postLoginPath`(returnTo 検証)、切替用の `sourceChoices`/`switchSourceHref` |
+| `lib/access.ts` | 純粋関数: 公開パス(`isPublicPath`、完全一致+`/`終わりの接頭辞)、`decideAccess`(middleware の判定。`/settings/*` は `isAccountPath` で source 非依存)、`homePath`、`safeReturnTo`/`postLoginPath`(returnTo 検証)、切替用の `sourceChoices`/`switchSourceHref` |
 | `lib/client-session.ts` | クライアント: `kakeibo_` 始まりの localStorage 消去、`rememberLoginUser`(利用者変更時の消去)、`handleSessionExpired`(401 時)、`logout` |
 | `lib/gas-auth.ts` | サーバー: GAS 認証系アクションの呼び出し `callGasAuth`(`key`+`authKey`、エラーは GAS のコードで返す。ログは呼び出し側で秘密を伏せて出す) |
+| `lib/webauthn.ts` | サーバー(Node のみ): `@simplewebauthn/server` の薄いラッパー。`webauthnConfig`(`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN` のみ、Host から導出しない)、登録・認証オプション生成、検証(例外は握りつぶして null)、応答の形式検査、userHandle → userId、GAS の credential 形式への変換 |
+| `lib/webauthn-challenge.ts` | サーバー: チャレンジCookie `kakeibo_webauthn`(`wa1.`、用途別の導出鍵で署名、5分、purpose と binding を固定)、`sha256Hex`(challengeHash・招待トークンハッシュ) |
+| `lib/passkey-assertion.ts` | サーバー: assertion 検証の共通処理(userHandle → `authGetCredential` → 所有者一致 → 署名・カウンタ → `authRecordCredentialUse`) |
+| `lib/passkey-flow.ts` | サーバー: GAS エラー → HTTP の固定エラー対応表、JSON 本文の読み取り、招待トークンの形式検査 |
+| `lib/passkey-client.ts` | クライアント: `/api/auth/*` への POST、固定文言のエラー表示、招待フラグメントの読み取り、アプリ内ブラウザー判定、チャレンジの鮮度 |
 | `lib/expense-identity.ts` | `isSameExpense()`: 両方に `rowId` があれば rowId 比較、なければ MessageId+日付+店舗+金額の従来比較(旧 localStorage キャッシュ互換) |
 | `lib/expenses-proxy.ts` | プロキシ用の純粋関数: `isAllowedSource()`(省略/main/yahoo/yuki。レジストリと一致をテストで検査)、`WRITE_ACTIONS`(GAS と一致をテストで検査)、`parseGasList()`(配列以外は例外、GAS エラーは `GasResponseError`)、`gasErrorStatus()`、`toGasQuery`/`withGasAuth`/`toGasBody`(サーバー専用フィールドの除去と付与)、`redactSecret()`(複数の秘密を伏せる) |
 | `lib/session.ts` | サーバー用 v2 セッション(userId・epoch・sources(ホーム先頭)・amr)の発行 `createSession` と検証 `readSession`(`APP_PASSWORD` 未設定時は `amr=pwd` を無効、v1 は無効)。Cookie 属性、定数時間比較 `constantTimeEqual` |
@@ -66,7 +76,9 @@
 | `test/session.test.mjs` / `test/auth-routes.test.mjs` | v2 セッションの改ざん(amr 含む)・期限・鍵・v1 拒否・`APP_PASSWORD` 未設定時の `amr=pwd` 拒否、Middlewareを経由しないAPIハンドラーの認証、パスワードログイン(authGetAdminUser・404・Cookie属性)、session/logout |
 | `test/access.test.mjs` | middleware の判定の表駆動(利用者×パス)、公開パスと類似パス、returnTo 検証、切替先、middleware.ts の実行 |
 | `test/expenses-proxy.test.mjs` / `test/client-session.test.mjs` | プロキシの 403・許可リスト・actor/authKey の除去と付与・GAS エラー変換・キャッシュキーとログに秘密が出ないこと / localStorage 消去の条件 |
-| `test/helpers/load-route.mjs` | Route Handler・middleware を VM で実行するテスト用ハーネス(テストではない) |
+| `test/helpers/load-route.mjs` | Route Handler・middleware を VM で実行するテスト用ハーネス(テストではない。`cookies` で `kakeibo_webauthn` 等も渡せる) |
+| `test/passkey-routes.test.mjs` / `test/webauthn-challenge.test.mjs` | パスキーの登録・ログイン・追加(再認証・bootstrap)、チャレンジの再利用・期限・目的違い・対象違い、カウンタ後退、userHandle 不一致、設定不備時の 503 / チャレンジCookie・RP 設定・固定版・クライアント補助 |
+| `test/helpers/soft-authenticator.mjs` / `test/helpers/fake-gas-auth.mjs` | ソフトウェア認証器(実 ES256 署名・CBOR attestation)/ 認証 API 契約に従うメモリ上の GAS(テストではない) |
 | `test/auth.browser.mjs` | 本番ビルドを一時起動し、毎回生成した認証情報と架空GASで認証・既存機能E2Eを実行するハーネス。実サービスへ接続しない |
 
 ## データフロー(3層キャッシュ)

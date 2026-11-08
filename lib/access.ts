@@ -41,6 +41,12 @@ function canOpenSource(sources: readonly string[], source: SourceId): boolean {
     return sources.includes(source);
 }
 
+// Screens about the signed-in user rather than a kakeibo (e.g.
+// /settings/passkeys): any session may open them, whatever its sources.
+export function isAccountPath(pathname: string): boolean {
+    return pathname === '/settings' || pathname.startsWith('/settings/');
+}
+
 export type AccessDecision =
     | { kind: 'allow' }
     | { kind: 'unauthorized' } // API without a valid session: 401
@@ -54,7 +60,7 @@ export function decideAccess({ pathname, search, session }: { pathname: string; 
     if (isPublicPath(pathname)) return { kind: 'allow' };
     const isApi = pathname === '/api' || pathname.startsWith('/api/');
     if (!session) return isApi ? { kind: 'unauthorized' } : { kind: 'login', returnTo: `${pathname}${search}` };
-    if (isApi) return { kind: 'allow' };
+    if (isApi || isAccountPath(pathname)) return { kind: 'allow' };
     if (!canOpenSource(session.sources, sourceFromPathname(pathname))) return { kind: 'redirect', location: homePath(session) };
     return { kind: 'allow' };
 }
@@ -77,7 +83,7 @@ export function safeReturnTo(value: unknown, sources: readonly string[]): string
     }
     if (url.origin !== RETURN_TO_ORIGIN || url.pathname.startsWith('//')) return null;
     if (url.pathname === '/login' || url.pathname === '/invite' || url.pathname === '/api' || url.pathname.startsWith('/api/')) return null;
-    if (!canOpenSource(sources, sourceFromPathname(url.pathname))) return null;
+    if (!isAccountPath(url.pathname) && !canOpenSource(sources, sourceFromPathname(url.pathname))) return null;
     return `${url.pathname}${url.search}${url.hash}`;
 }
 

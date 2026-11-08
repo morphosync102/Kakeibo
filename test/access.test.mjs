@@ -81,6 +81,18 @@ test('a password session without APP_PASSWORD reaches the middleware as null (re
     for (const [path, , , anonExpected] of PAGE_TABLE) assert.equal(show(decide(null, path)), anonExpected);
 });
 
+test('account screens (/settings/*) are open to any session, whatever its sources, and protected without one', () => {
+    const yukiOnly = { userId: 'u_other_synthetic', epoch: 0, sources: ['yuki'], homeSource: 'yuki', amr: 'pk' };
+    for (const session of [admin, yuki, yukiOnly]) {
+        assert.equal(show(decide(session, '/settings/passkeys')), 'allow');
+        assert.equal(safeReturnTo('/settings/passkeys', session.sources), '/settings/passkeys');
+    }
+    assert.equal(show(decide(null, '/settings/passkeys')), 'login(/settings/passkeys)');
+    assert.equal(isPublicPath('/settings/passkeys'), false);
+    // look-alikes are still screens of main
+    assert.equal(show(decide(yukiOnly, '/settingsX')), '-> /yuki');
+});
+
 test('home paths: admin -> /, Yuki -> /yuki', () => {
     assert.equal(homePath(admin), '/');
     assert.equal(homePath(yuki), '/yuki');

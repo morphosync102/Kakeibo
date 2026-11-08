@@ -13,7 +13,8 @@ export const SYNTHETIC_GAS_URL = 'http://localhost/synthetic-upstream';
 
 // upstream(args) answers each fetch (its return value is sent as JSON; a throw
 // is a transport error). cookie: the kakeibo_session value or undefined.
-export async function loadRoute(path, { env = {}, cookie, upstream = () => [] } = {}) {
+// cookies: other request cookies by name (e.g. kakeibo_webauthn).
+export async function loadRoute(path, { env = {}, cookie, cookies = {}, upstream = () => [] } = {}) {
     const code = ts.transpileModule(fs.readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'), {
         compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText;
@@ -29,6 +30,10 @@ export async function loadRoute(path, { env = {}, cookie, upstream = () => [] } 
         '@/lib/expenses-proxy': await import('../../lib/expenses-proxy.ts'),
         '@/lib/access': await import('../../lib/access.ts'),
         '@/lib/gas-auth': await import('../../lib/gas-auth.ts'),
+        '@/lib/webauthn': await import('../../lib/webauthn.ts'),
+        '@/lib/webauthn-challenge': await import('../../lib/webauthn-challenge.ts'),
+        '@/lib/passkey-flow': await import('../../lib/passkey-flow.ts'),
+        '@/lib/passkey-assertion': await import('../../lib/passkey-assertion.ts'),
     };
     const log = (...args) => logs.push(args.map(String).join(' '));
     vm.runInNewContext(code, {
@@ -39,7 +44,14 @@ export async function loadRoute(path, { env = {}, cookie, upstream = () => [] } 
         fetch: async (...args) => { calls.push(args); return Response.json(await upstream(args)); },
         require: name => {
             if (name in libs) return libs[name];
-            if (name === 'next/headers') return { cookies: async () => ({ get: n => (n === 'kakeibo_session' && cookie ? { value: cookie } : undefined) }) };
+            if (name === 'next/headers') return {
+                cookies: async () => ({
+                    get: n => {
+                        if (n === 'kakeibo_session') return cookie ? { value: cookie } : undefined;
+                        return Object.prototype.hasOwnProperty.call(cookies, n) && cookies[n] !== undefined ? { value: cookies[n] } : undefined;
+                    },
+                }),
+            };
             if (name === 'next/cache') return {
                 revalidateTag: (tag, profile) => {
                     revalidated.push([tag, profile]);

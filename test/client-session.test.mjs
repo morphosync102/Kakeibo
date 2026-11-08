@@ -117,9 +117,27 @@ test('postWrite on 401 clears the cache, goes to /login and rejects', async (t) 
 });
 
 test('the login page clears the cache for reason=session and records the user after a login', () => {
-    const page = fs.readFileSync(new URL('../app/login/page.tsx', import.meta.url), 'utf8');
+    const page = fs.readFileSync(new URL('../app/login/LoginForm.tsx', import.meta.url), 'utf8');
     assert.match(page, /searchParams\.get\('reason'\) === 'session'/);
     assert.match(page, /clearKakeiboStorage\(/);
     assert.match(page, /rememberLoginUser\(/);
     assert.doesNotMatch(page, /router\.push\(returnTo/, 'returnTo is validated by the server (redirectTo)');
+    // both logins (password and passkey) go through the same housekeeping
+    assert.match(page, /\/api\/auth\/login\/verify/);
+    assert.match(page, /\/api\/auth\/verify/);
+});
+
+test('the invite page records the new user (clearing another user\'s cache) and removes the token from the address bar', () => {
+    const page = fs.readFileSync(new URL('../app/invite/page.tsx', import.meta.url), 'utf8');
+    assert.match(page, /rememberLoginUser\(/);
+    assert.match(page, /history\.replaceState\(null, '', '\/invite'\)/);
+    assert.doesNotMatch(page, /console\./, 'the token is never logged');
+});
+
+test('the password form of /login exists only while APP_PASSWORD is set (rendered per request)', () => {
+    const page = fs.readFileSync(new URL('../app/login/page.tsx', import.meta.url), 'utf8');
+    assert.match(page, /await connection\(\)/);
+    assert.match(page, /isPasswordLoginEnabled\(process\.env\)/);
+    const form = fs.readFileSync(new URL('../app/login/LoginForm.tsx', import.meta.url), 'utf8');
+    assert.match(form, /\{passwordEnabled && \(/);
 });

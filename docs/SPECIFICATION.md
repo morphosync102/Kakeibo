@@ -67,7 +67,8 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
 
 ### 認証
 
-設計書`docs/design/2026-11-yuki-and-passkeys.md` §3.8・§3.10・§4。パスキー(U3)までは、共有パスワードでのログインだけがあります(移行期間)。
+設計書`docs/design/2026-11-yuki-and-passkeys.md` §3・§4。ログインはパスキー(WebAuthn、Face ID 等)で行います。
+移行期間(`APP_PASSWORD`設定中)は共有パスワードでのログインも残ります。
 
 - セッション(`kakeibo_session`、v2): `v2.<発行>.<期限>.<nonce>.<userId>.<epoch>.<sources>.<amr>.<署名>`をHMAC-SHA256(`SESSION_SECRET`)で署名し、
   30日間設定します。sourcesは`+`区切りでホームのsourceが先頭、amrは`pwd`(共有パスワード)/`pk`(パスキー)。
@@ -97,6 +98,59 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   - `/login?reason=session`を開いたとき
   - ログイン成功時に利用者が変わったとき(`kakeibo_user`の記録が別のuserId、または記録が無い。消去してから記録)
   - ログアウト時
+  - パスキーでのログイン成功時・招待での登録完了時も、上と同じく`kakeibo_user`で利用者の変更を判定します。
+
+#### パスキー(WebAuthn)
+
+設計書§3.1〜3.6・§3.10。サーバーは`@simplewebauthn/server` 14.0.3、ブラウザーは`@simplewebauthn/browser` 14.0.0(どちらも完全固定)。
+検証はNode.jsのRoute Handler(`/api/auth/*`)だけで行い、middleware(Edge)では行いません。GASは署名を検証せず、検証済みの結果を保存・照合します(§4「認証API」)。
+
+- RP ID・origin: Vercel環境変数`WEBAUTHN_RP_ID`(ホスト名)と`WEBAUTHN_ORIGIN`(`https://<ホスト>`。パスなし、末尾`/`なし。
+  httpは`localhost`のみ)だけから決め、`Host`ヘッダ等リクエストからは導出しません。originのホストはRP IDかそのサブドメインであること。
+  未設定・不正のときはパスキーの全API(下表)が503で、GASを呼ばずCookieも出しません(プレビュー環境は認証無効)。
+- 方式: discoverable credential(`residentKey: required`)、`userVerification: required`、`attestation: none`、ES256(-7)/RS256(-257)、
+  タイムアウト120秒。WebAuthnの`user.id`(userHandle)は userId のUTF-8バイト列。
+- チャレンジCookie`kakeibo_webauthn`: `wa1.<purpose>.<発行>.<期限>.<challenge>.<binding>.<署名>`。challengeは32バイト乱数(base64url)。
+  署名鍵は`HMAC-SHA256(SESSION_SECRET, "kakeibo/webauthn-challenge/v1")`で導出した用途専用の鍵(セッションとは鍵も書式も別で、相互に受理されない)。
+  HttpOnly・SameSite=Strict・Path=`/api/auth`・本番Secure・有効5分。目的(purpose)と対象(binding)を固定し、verify系は成功・失敗に関わらず削除します。
+
+  | purpose | 発行 | binding | 受理 |
+  | --- | --- | --- | --- |
+  | `register` | `register/options` | 招待トークンのSHA-256 | `register/verify`(同じトークン) |
+  | `login` | `login/options` | `-` | `login/verify` |
+  | `reauth` | `passkeys/add/options` | セッションのuserId | `passkeys/add/reauth` |
+  | `add` | `passkeys/add/reauth`(再認証成功後の新しいチャレンジ) | セッションのuserId | `passkeys/add/verify` |
+  | `bootstrap` | `passkeys/add/bootstrap`(パスワード再入力後) | セッションのuserId | `passkeys/add/verify`(`APP_PASSWORD`設定中のみ) |
+
+- 1回限り: 検証に成功したチャレンジのSHA-256(`challengeHash`、UTF-8のbase64url文字列のSHA-256・小文字16進)をGASが5分記録し、
+  2回目は`ChallengeReused`(→ 400 `ChallengeInvalid`)。
+- API(すべてPOST、応答は`Cache-Control: no-store`。エラーは固定の語のみで、GAS・ライブラリの詳細、チャレンジ、トークンを含めません):
+
+  | API | 公開 | 処理 | 成功時 |
+  | --- | --- | --- | --- |
+  | `/api/auth/register/options` `{ token }` | 公開 | 招待トークンのSHA-256だけをGAS`authPeekInvite`へ(トークン自体は送らない)。`excludeCredentials`=その利用者の既存パスキー | `{ options, displayName }` + register Cookie |
+  | `/api/auth/register/verify` `{ token, response }` | 公開 | Cookie(同じ招待)→ 登録検証(challenge・origin・rpID・UV)→ `authConsumeInviteAndAddCredential`(招待消費+追加を原子的に) | `{ success, userId, redirectTo: ホーム }` + `amr=pk`のセッション |
+  | `/api/auth/login/options` | 公開 | GAS往復なし。`allowCredentials`なし | `{ options }` + login Cookie |
+  | `/api/auth/login/verify` `{ response, returnTo? }` | 公開 | Cookie → userHandle必須 → `authGetCredential` → userHandle・パスキーの所有者・GASの利用者が一致 → 署名・UV・カウンタ検証 → `authRecordCredentialUse` | `{ success, userId, redirectTo }`(returnToはパスワードログインと同じ検証)+ `amr=pk`のセッション |
+  | `/api/auth/passkeys/add/options` | 要セッション | `authListCredentials`(actor)。1件以上: 本人のパスキーだけを`allowCredentials`にした再認証 | `{ mode: 'reauth', options }` + reauth Cookie。0件で`APP_PASSWORD`設定中: `{ mode: 'bootstrap' }`(Cookieなし)。0件で未設定: 403 |
+  | `/api/auth/passkeys/add/reauth` `{ response }` | 要セッション | reauth Cookie → login/verifyと同じ検証(userHandleとパスキーの所有者がセッションの利用者)→ epochがセッションと一致 → `authListCredentials`(excludeCredentials) | 登録用の**新しい**`{ options }` + add Cookie |
+  | `/api/auth/passkeys/add/bootstrap` `{ password }` | 要セッション | `APP_PASSWORD`未設定は404。定数時間比較(不一致401、GASを呼ばない)→ `authListCredentials`が0件でなければ403 | `{ options }` + bootstrap Cookie |
+  | `/api/auth/passkeys/add/verify` `{ response }` | 要セッション | add/bootstrap Cookie(セッションのuserId)→ 登録検証 → `authAddCredential`(actor、bootstrap時のみ`bootstrap: true`。GASがepoch・role=admin・0件を再確認) | `{ success, credentialCount }`。add(パスキー再認証)ではセッションを`amr=pk`で発行し直す。bootstrapはセッションを変えない |
+
+- エラー: 400 `Invalid request` / `ChallengeInvalid`(Cookieなし・期限切れ・目的違い・別の対象・再利用)/ `VerificationFailed`(登録検証の失敗)、
+  401 `VerificationFailed`(認証検証の失敗・userHandle不一致・カウンタ後退・失効済みや存在しないパスキー)、401 `Unauthorized`(セッション無効、GAS`SessionRevoked`。セッションCookieを削除)、
+  403 `NotAllowed`(`NoExistingCredential`・`BootstrapNotAllowed`、bootstrapの条件外)、409 `CredentialExists`、410 `InviteInvalid`、
+  503 `Service Unavailable`(設定不備・GASの失敗)。`authRecordCredentialUse`の失敗は`ChallengeReused`・`CredentialNotFound`だけがログイン失敗で、
+  それ以外(`Busy`等)はログのみでログインを続けます。
+- カウンタ: 保存値・応答値のどちらかが0より大きく、応答値が保存値以下なら拒否(複製された認証器の検出)。iCloudキーチェーン等の同期パスキーは常に0で、0同士は許可。
+  GASはカウンタが増えたときだけ更新します。
+- 招待画面`/invite#<token>`: トークンはURLフラグメントから読み、直ちにアドレスバー・履歴から消します(`history.replaceState`)。
+  LINE等のアプリ内ブラウザーでは「Safariで開く」案内を表示します。登録完了後はホーム画面追加とPWA(Safariとログイン状態が別)の案内を表示します。
+- `/login`: 「パスキーでログイン」(画面表示時にチャレンジを先に取得し、4分を過ぎたら取り直す。iOSはタップ直後のWebAuthn呼び出しを求めるため)。
+  パスワード欄は`APP_PASSWORD`設定中だけ表示します(リクエストごとに描画)。
+- `/settings/passkeys`(管理画面下部の「パスキーを追加」から): 既存パスキーで本人確認 → 新しいパスキーを登録、の2タップ。
+  パスキーが無い管理者は最初の1つだけパスワード再入力で登録できます(GASがrole=adminを確認)。追加後に1件だけなら2つ目の登録を勧めます。
+  `/settings/*`は利用者の画面で、sourcesに関係なくログイン中なら開けます(未ログインは`/login`)。一覧・失効・全端末ログアウトはU4。
 
 ### レポート
 
@@ -606,6 +660,9 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `SESSION_SECRET`: 暗号学的乱数32バイトを64文字の16進数で設定する、サーバー専用の署名鍵。パスワードから生成せず、ソース・ログには保存しません。本番デプロイ前に設定が必要です。ローカル開発でも独立した鍵を環境変数に設定します。
 - `GAS_API_URL`
 - `GAS_PROXY_SECRET`: GASとの共有シークレット(プロキシ認証)。GASの`PROXY_SECRET`と同じ値。
+- `WEBAUTHN_RP_ID`: パスキーのRP ID(本番ドメインのホスト名。`vercel.app`は不可で完全なホスト名。ローカルは`localhost`)。秘密値ではない
+- `WEBAUTHN_ORIGIN`: パスキーの期待するorigin(`https://<本番ドメイン>`。ローカルは`http://localhost:3000`)。秘密値ではない。
+  `WEBAUTHN_RP_ID`と合わせて未設定・不正の間はパスキーのAPIがすべて503(§2「パスキー」)。RP IDを変えると登録済みのパスキーは使えなくなる
 - `GAS_AUTH_PROXY_SECRET`: GASの`AUTH_PROXY_SECRET`と同じ値(`authKey`)。`/api/expenses`(actor付きの全要求)と`/api/auth/*`(認証系アクション)が送る。
   未設定の間、`/api/expenses`は503、パスワードログインは503(UIリリース前に設定が必要。設計書§7.2)
 
@@ -638,6 +695,10 @@ npm run build
 
 GASの変更には、VM sandboxを使う`test/gas-*.test.mjs`で回帰テストを追加します。
 主要UI契約の回帰は`test/*.test.mjs`で確認します。
+
+パスキーのAPIは`test/passkey-routes.test.mjs`で、ソフトウェア認証器(`test/helpers/soft-authenticator.mjs`: Nodeの`crypto`で
+ES256鍵を生成し、attestation(`none`)・assertionを実際に組み立てて署名する。`@simplewebauthn/server`はモックしない)と
+認証APIの契約に従うメモリ上のGAS(`test/helpers/fake-gas-auth.mjs`)で検証します。チャレンジCookieは`test/webauthn-challenge.test.mjs`。
 
 集計・検索の純粋関数は`test/expense-analysis.test.mjs`で検証します（TypeScriptを直接実行できるNode.js 22.18以降）。
 ブラウザー回帰は実データを使わず全明細APIを架空データに差し替えます。

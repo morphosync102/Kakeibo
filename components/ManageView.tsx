@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import BottomNav from '@/components/BottomNav';
 import SourceSwitcher from '@/components/SourceSwitcher';
 import { logout } from '@/lib/client-session';
@@ -254,7 +255,13 @@ export default function ManageView({ source }: ManageViewProps) {
 
             </div >
             {/* Logout of this device: deletes the cookie and every kakeibo_ cache */}
-            <div className="px-4 pb-6 flex justify-center">
+            <div className="px-4 pb-6 flex justify-center gap-6">
+                <Link
+                    href="/settings/passkeys"
+                    className={clsx("text-sm underline", isDarkMode ? "text-gray-400" : "text-gray-500")}
+                >
+                    パスキーを追加
+                </Link>
                 <button
                     type="button"
                     onClick={() => { void logout(); }}
