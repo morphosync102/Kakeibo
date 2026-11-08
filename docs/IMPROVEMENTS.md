@@ -293,6 +293,15 @@ Vercel から NAS へ移しても GAS を経由する限り体感はほぼ変わ
   G5(`AUTHZ_ENFORCE` 未設定時の互換と `PROXY_SECRET` 未設定時の素通しの削除。IMPROVEMENTS 4-1 の完了)。
 - 8-3. 三井住友カード(Vpass)の通知メールが 2025-03 以降「ご利用日時：」形式に変わり、`parseOliveBody`(旧「◇利用日：」形式)が
   取り込めていない可能性。新形式パーサと過去分の再取込。Yuki のカード(同じ三井住友カード)の取込にも共通で使う。
+  - **対応(コード)**: 新形式の純粋関数パーサ `parseVpassBody` と新旧両対応の `parseVpassEmail`、事前確認 `previewVpassReimport` /
+    `previewVpassReimport202503`(書き込みなし)、再取込 `reimportVpassSince` / `reimportVpassSince202503`(手入力行と日付・金額が一致する明細は
+    1対1でスキップ、ページごとにロック内で追記、約4.5分で中断し再実行で続きから)、形式確認 `debugLatestVpassParse`(SPECIFICATION §5「三井住友カード」)。
+  - **残り(ユーザー作業、GAS デプロイ後)**: `getPlainBody()` の実際の改行位置は未確認のため、
+    `debugLatestVpassParse()`(1件以上・日付/店名/金額 yes)→ `previewVpassReimport202503()`(取込件数と手入力一致のスキップ数を確認)→
+    `reimportVpassSince202503()`(「NOT complete」なら再実行)→ 個人用の明細で数件を目視確認。
+    取れない場合は実行ログ(値は出ない)を共有してもらい、パーサを調整する。利用区分が `（買物）` 等以外の表記なら `VPASS_USAGE_SUFFIXES` に追加。
+  - 注意: Yuki の Vpass 通知を管理者 Gmail へ自動転送すると yahoo に入るため転送しない。フェーズ2で転送方式を採る場合は転送元アドレス
+    (Script Property)で yuki に振り分け yahoo から除外する設計が別途必要(SPECIFICATION §5 の注意)。
 
 ## 対応済み(参考)
 

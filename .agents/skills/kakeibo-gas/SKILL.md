@@ -220,6 +220,18 @@ Report content:
 - Vpass / Olive emails go to `Yahoo_Data`.
 - JCB shopping notification emails from `mail@qa.jcb.co.jp` go to `Yahoo_Data`.
 
+Vpass (三井住友カード / Olive, `statement@vpass.ne.jp`) parser: `parseVpassEmail(body)` = the 2025-03+ format
+(`parseVpassBody`, pure: "ご利用日時：" blocks, any line layout, `|` / tag leftovers / NBSP / full-width spaces and
+digits tolerated, several transactions per mail, date part only as `YYYY/MM/DD`, usage-type suffix such as `（買物）`
+removed so merchants match the old format) falling back to the old format (`parseOliveBody`, "◇利用日："). Keep
+`parseVpassBody` free of Apps Script services (the phase-2 NAS ingest reuses it). Editor functions, in this order:
+`debugLatestVpassParse()` (logs counts and yes/no checks only) → `previewVpassReimport202503()` (dry run, no lock,
+no write) → `reimportVpassSince202503()` (= `reimportVpassSince('2025/03/01')`: page by page under the lock;
+MessageId dedup, so re-running adds nothing; a transaction whose date and amount equal a row NOT imported from a
+mail (MessageId not a Gmail hex id: `manual_…`, `fixed_…`, empty; income rows excluded) is skipped, one to one,
+merchant ignored; stops after ~4.5 min, run again to continue). Never log mail bodies, merchants or amounts.
+Every Vpass mail in the admin's Gmail goes to yahoo: never auto-forward Yuki's Vpass mails there.
+
 JCB parser fields:
 
 - `【ご利用日時(日本時間)】` -> Date

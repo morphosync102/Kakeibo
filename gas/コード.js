@@ -1419,33 +1419,55 @@ function parseEmailBody(body) {
   return items;
 }
 
+// --- 三井住友カード (Vpass / Olive) ---
+// Notifications from statement@vpass.ne.jp go to the personal kakeibo (yahoo).
+// Since 2025-03 they are HTML mails ("ご利用日時：" format, parseVpassBody);
+// older mails use "◇利用日：" (parseOliveBody). parseVpassEmail accepts both.
+const VPASS_SEARCH_BASE = 'from:statement@vpass.ne.jp subject:利用のお知らせ';
+const VPASS_TARGET_SOURCE = 'yahoo';
+const VPASS_REIMPORT_PAGE_SIZE = 100;
+const VPASS_REIMPORT_MAX_THREADS = 2000;
+
 function extractOliveEmails() {
   console.log("--- Starting Olive (Vpass) Extraction ---");
-  const sheets = getTargetSheets('yahoo');
-  const categoryMap = getCategoryMap(sheets.config);
-
-  const query = 'from:statement@vpass.ne.jp subject:利用のお知らせ newer_than:5d';
-  const threads = GmailApp.search(query);
-
+  const threads = GmailApp.search(`${VPASS_SEARCH_BASE} newer_than:5d`);
   if (threads.length === 0) return;
+  const target = getVpassImportTarget();
+  const built = buildVpassRows(GmailApp.getMessagesForThreads(threads), target.categoryMap);
+  appendImportedRows(target.sheet, built.rows, VPASS_TARGET_SOURCE, 'Olive');
+}
 
-  const messages = GmailApp.getMessagesForThreads(threads);
-  const ss = SpreadsheetApp.openById(SHEET_ID);
-  const sheet = ss.getSheetByName(sheets.data);
-  const newRows = [];
+function getVpassImportTarget() {
+  const sheets = getTargetSheets(VPASS_TARGET_SOURCE);
+  return {
+    categoryMap: getCategoryMap(sheets.config),
+    sheet: SpreadsheetApp.openById(SHEET_ID).getSheetByName(sheets.data)
+  };
+}
 
-  for (const threadMessages of messages) {
+// Data rows (column A..G) for every transaction of the given Gmail messages
+// (array of threads' message arrays). Messages whose id is in `skipIds` are
+// not read. Never logs mail contents.
+function buildVpassRows(threadMessagesList, categoryMap, skipIds) {
+  const rows = [];
+  let messageCount = 0;
+  let parsedMessages = 0;
+  let skippedMessages = 0;
+  for (const threadMessages of threadMessagesList) {
     for (const message of threadMessages) {
-
-      const body = message.getPlainBody();
-      const items = parseOliveBody(body);
+      messageCount++;
+      if (skipIds && skipIds.has(message.getId())) {
+        skippedMessages++;
+        continue;
+      }
+      const items = parseVpassEmail(message.getPlainBody());
+      if (items.length > 0) parsedMessages++;
       for (const item of items) {
-        const category = determineCategory(item.merchant, categoryMap);
-        newRows.push([
+        rows.push([
           item.date,
           item.merchant,
           item.amount,
-          category,
+          determineCategory(item.merchant, categoryMap),
           message.getId(),
           new Date(),
           'Expense'
@@ -1453,8 +1475,270 @@ function extractOliveEmails() {
       }
     }
   }
+  return {rows: rows, messageCount: messageCount, parsedMessages: parsedMessages, skippedMessages: skippedMessages};
+}
 
-  appendImportedRows(sheet, newRows, 'yahoo', 'Olive');
+// Both formats; the new (2025-03+) format wins when it finds anything.
+function parseVpassEmail(body) {
+  const items = parseVpassBody(body);
+  return items.length > 0 ? items : parseOliveBody(String(body || ''));
+}
+
+// Usage-type suffixes Vpass appends to the merchant ("<店名>（買物）"). They are
+// removed so merchants read the same as in the old format ("◇利用先：<店名>"):
+// updateCategory matches merchants exactly. Unknown suffixes are kept (keyword
+// matching of Config still works on them).
+const VPASS_USAGE_SUFFIXES = Object.freeze(['買物', 'ショッピング', '公共料金', '公共料金等']);
+const VPASS_MAX_MERCHANT_LENGTH = 100;
+
+// Text of an HTML-ish notification as plain lines: tags removed (<br> and
+// block ends become line breaks), common entities decoded, table bars, NBSP
+// and full-width spaces turned into spaces, empty lines dropped.
+function normalizeVpassText(body) {
+  return String(body || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6]|table)\s*>/gi, '\n')
+    .replace(/<[^<>\n]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&yen;/gi, '¥')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/gi, '&')
+    .replace(/[|｜ 　\t]/g, ' ')
+    .split('\n')
+    .map(line => line.replace(/ {2,}/g, ' ').trim())
+    .filter(line => line.length > 0)
+    .join('\n');
+}
+
+function toHalfWidthDigits(text) {
+  return text.replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/，/g, ',');
+}
+
+function stripVpassUsageSuffix(merchant) {
+  const match = merchant.match(/^(.*?)\s*[（(]\s*([^（）()]{1,10})\s*[）)]$/);
+  if (match && match[1].trim() !== '' && VPASS_USAGE_SUFFIXES.indexOf(match[2].trim()) !== -1) return match[1].trim();
+  return merchant;
+}
+
+// Pure parser of the 2025-03+ Vpass notification text (also for text converted
+// from HTML elsewhere, e.g. the phase-2 NAS worker for Yuki). For every
+// "ご利用日時：YYYY/MM/DD[ HH:MM]" block: the merchant is the text up to the
+// first "<amount>円", in whatever line layout. Returns
+// [{date: 'YYYY/MM/DD', merchant, amount}] (date part only; [] if nothing).
+function parseVpassBody(body) {
+  const text = normalizeVpassText(body);
+  const header = /ご利用日時\s*[：:]\s*([0-9０-９]{4})\s*[\/年／\-]\s*([0-9０-９]{1,2})\s*[\/月／\-]\s*([0-9０-９]{1,2})\s*日?(?:\s*[0-9０-９]{1,2}\s*[:：]\s*[0-9０-９]{2}(?:\s*[:：]\s*[0-9０-９]{2})?)?/g;
+  const headers = [];
+  let match;
+  while ((match = header.exec(text)) !== null) {
+    headers.push({start: match.index, end: header.lastIndex, y: match[1], m: match[2], d: match[3]});
+  }
+  const items = [];
+  headers.forEach((h, i) => {
+    const year = Number(toHalfWidthDigits(h.y));
+    const month = Number(toHalfWidthDigits(h.m));
+    const day = Number(toHalfWidthDigits(h.d));
+    if (month < 1 || month > 12 || day < 1 || day > 31) return;
+    const segment = text.slice(h.end, i + 1 < headers.length ? headers[i + 1].start : text.length);
+    // "<digits>円" ending a word (so "100円ショップ" in a name is not the amount)
+    const amountMatch = segment.match(/([0-9０-９][0-9０-９,，]*)\s*円(?=\s|$)/);
+    if (!amountMatch) return;
+    const amount = parseInt(toHalfWidthDigits(amountMatch[1]).replace(/,/g, ''), 10);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    const merchant = stripVpassUsageSuffix(segment.slice(0, amountMatch.index)
+      .split('\n')
+      .map(line => line.trim())
+      // other labelled lines (e.g. "ご利用カード：…") are not the merchant
+      .filter(line => line !== '' && !/^(ご利用|利用|お支払|支払)[^：:\n]{0,10}[：:]/.test(line))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim());
+    if (merchant === '' || merchant.length > VPASS_MAX_MERCHANT_LENGTH) return;
+    items.push({
+      date: `${year}/${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`,
+      merchant: merchant,
+      amount: amount
+    });
+  });
+  return items;
+}
+
+// --- Vpass re-import (editor functions) ---
+// Between 2025-03 and the parser fix, Olive payments may have been entered by
+// hand (MessageId manual_...). A re-imported transaction is therefore skipped
+// when a row NOT imported from a mail (MessageId not a Gmail id: manual_,
+// fixed_, empty, ...) of the same date and amount exists. Matching is one to
+// one (each such row absorbs one transaction) and ignores the merchant (hand
+// written names differ from the card's). Income rows are not matched.
+// Pages of 100 threads are processed one at a time (the duplicate checks and
+// the append under the script lock); the run stops after about 4.5 minutes
+// (Apps Script allows 6) and is idempotent, so running it again continues.
+const VPASS_REIMPORT_TIME_BUDGET_MS = 270 * 1000;
+const GMAIL_MESSAGE_ID_PATTERN = /^[0-9a-f]{10,24}$/i;
+
+function isMailMessageId(id) {
+  return typeof id === 'string' && GMAIL_MESSAGE_ID_PATTERN.test(id);
+}
+
+function vpassMatchKey(date, amount) {
+  const day = normalizeTransactionDate(date);
+  const value = Number(amount);
+  return day && Number.isFinite(value) ? `${day}|${value}` : null;
+}
+
+// The sheet's MessageIds and, per date|amount, the number of expense rows that
+// were not imported from a mail
+function readVpassExisting(sheet) {
+  const ids = new Set();
+  const manual = {};
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, 7).getValues().forEach(row => {
+      if (row[4]) ids.add(row[4]);
+      if (isMailMessageId(String(row[4] || '')) || row[6] === 'Income') return;
+      const key = vpassMatchKey(row[0], row[2]);
+      if (key) manual[key] = (manual[key] || 0) + 1;
+    });
+  }
+  return {ids: ids, manual: manual};
+}
+
+// Splits candidate rows into already imported / matching a non-mail row /
+// to add. `consumed` (date|amount -> rows already matched) is shared by the
+// pages of one run, so a manual row absorbs at most one transaction.
+function planVpassRows(existing, rows, consumed) {
+  const toAdd = [];
+  let alreadyImported = 0;
+  let matchedManual = 0;
+  rows.forEach(row => {
+    if (existing.ids.has(row[4])) {
+      alreadyImported++;
+      return;
+    }
+    const key = vpassMatchKey(row[0], row[2]);
+    if (key && (existing.manual[key] || 0) - (consumed[key] || 0) > 0) {
+      consumed[key] = (consumed[key] || 0) + 1;
+      matchedManual++;
+      return;
+    }
+    toAdd.push(row);
+  });
+  return {toAdd: toAdd, alreadyImported: alreadyImported, matchedManual: matchedManual};
+}
+
+// Shared by previewVpassReimport (dryRun) and reimportVpassSince. `options`
+// (now, budgetMs) exist for tests only.
+function runVpassReimport(name, since, dryRun, options) {
+  if (typeof since !== 'string' || !/^\d{4}\/\d{2}\/\d{2}$/.test(since)) {
+    throw new Error(`${name}: give the start date as 'YYYY/MM/DD'.`);
+  }
+  const opts = options || {};
+  const now = typeof opts.now === 'function' ? opts.now : () => Date.now();
+  const budgetMs = typeof opts.budgetMs === 'number' ? opts.budgetMs : VPASS_REIMPORT_TIME_BUDGET_MS;
+  const startedAt = now();
+  const target = getVpassImportTarget();
+  if (!target.sheet) throw new Error(`${name}: the yahoo data sheet is missing.`);
+  const totals = {
+    threads: 0, messages: 0, alreadyImportedMessages: 0, parsedMessages: 0, transactions: 0,
+    alreadyImported: 0, matchedManual: 0, added: 0, wouldAdd: 0, complete: false, dryRun: dryRun
+  };
+  const consumed = {};
+  for (let start = 0; ; start += VPASS_REIMPORT_PAGE_SIZE) {
+    if (start >= VPASS_REIMPORT_MAX_THREADS) {
+      console.warn(`${name}: stopped at ${VPASS_REIMPORT_MAX_THREADS} threads; run again with a later date for the rest.`);
+      break;
+    }
+    const page = GmailApp.search(`${VPASS_SEARCH_BASE} after:${since}`, start, VPASS_REIMPORT_PAGE_SIZE);
+    if (page.length > 0) {
+      // Messages already in the sheet are not read again (keeps re-runs fast)
+      const built = buildVpassRows(GmailApp.getMessagesForThreads(page), target.categoryMap, readVpassExisting(target.sheet).ids);
+      totals.threads += page.length;
+      totals.messages += built.messageCount;
+      totals.alreadyImportedMessages += built.skippedMessages;
+      totals.parsedMessages += built.parsedMessages;
+      totals.transactions += built.rows.length;
+      const apply = () => {
+        const plan = planVpassRows(readVpassExisting(target.sheet), built.rows, consumed);
+        totals.alreadyImported += plan.alreadyImported;
+        totals.matchedManual += plan.matchedManual;
+        if (dryRun) totals.wouldAdd += plan.toAdd.length;
+        else totals.added += appendImportedRowsLocked(target.sheet, plan.toAdd, VPASS_TARGET_SOURCE);
+      };
+      if (dryRun) {
+        apply();
+      } else {
+        runWithScriptLock(apply, () => {
+          throw new Error(`${name}: could not acquire the script lock; run it again later (rows added so far stay, a re-run continues).`);
+        }, FIXED_COST_LOCK_WAIT_MS);
+      }
+    }
+    if (page.length < VPASS_REIMPORT_PAGE_SIZE) {
+      totals.complete = true;
+      break;
+    }
+    if (now() - startedAt > budgetMs) {
+      console.log(`${name}: stopped after about ${Math.round(budgetMs / 60000 * 10) / 10} min; run it again to continue (already imported mails are skipped).`);
+      break;
+    }
+  }
+  const outcome = dryRun ? `${totals.wouldAdd} would be added` : `${totals.added} added`;
+  console.log(`${name}: ${totals.threads} thread(s), ${totals.messages} message(s) (${totals.alreadyImportedMessages} already imported), ` +
+    `${totals.transactions} transaction(s) parsed from ${totals.parsedMessages} message(s), ${totals.alreadyImported} already imported, ` +
+    `${totals.matchedManual} skipped as matching a hand-entered row (same date and amount), ${outcome}, ${totals.complete ? 'complete' : 'NOT complete (run again)'}.`);
+  return totals;
+}
+
+// Editor function: what reimportVpassSince would do, without writing anything
+function previewVpassReimport(since, options) {
+  return runVpassReimport('previewVpassReimport', since, true, options);
+}
+
+// Editor function: re-imports Vpass notifications received since `since`
+// ('YYYY/MM/DD') into yahoo (see above). Logs counts only (never subjects,
+// bodies, merchants or amounts).
+function reimportVpassSince(since, options) {
+  return runVpassReimport('reimportVpassSince', since, false, options);
+}
+
+// Argument-free wrappers for the editor's Run button: since the format change (2025-03)
+function previewVpassReimport202503() {
+  return previewVpassReimport('2025/03/01');
+}
+
+function reimportVpassSince202503() {
+  return reimportVpassSince('2025/03/01');
+}
+
+// Editor function: parses the latest Vpass notification and logs only what
+// was found (count, which format, whether each field is present / numeric),
+// never the values. For checking the mail format after a deploy.
+function debugLatestVpassParse() {
+  const threads = GmailApp.search(VPASS_SEARCH_BASE, 0, 1);
+  if (threads.length === 0) {
+    console.log('debugLatestVpassParse: no Vpass notification found.');
+    return {found: false};
+  }
+  const messages = threads[0].getMessages();
+  const body = messages[messages.length - 1].getPlainBody();
+  const newItems = parseVpassBody(body);
+  const items = newItems.length > 0 ? newItems : parseOliveBody(String(body || ''));
+  const format = newItems.length > 0 ? 'new (ご利用日時)' : (items.length > 0 ? 'old (◇利用日)' : 'none');
+  const text = normalizeVpassText(body);
+  console.log(`debugLatestVpassParse: ${items.length} transaction(s), format ${format}, "ご利用日時" label ${text.indexOf('ご利用日時') !== -1 ? 'present' : 'absent'}, body ${String(body || '').length} chars.`);
+  const checks = items.map((item, i) => {
+    const check = {
+      hasDate: /^\d{4}\/\d{1,2}\/\d{1,2}$/.test(String(item.date)),
+      hasMerchant: typeof item.merchant === 'string' && item.merchant.trim() !== '',
+      amountIsNumber: typeof item.amount === 'number' && Number.isFinite(item.amount)
+    };
+    console.log(`  #${i + 1}: date ${check.hasDate ? 'yes' : 'NO'}, merchant ${check.hasMerchant ? 'yes' : 'NO'}, amount numeric ${check.amountIsNumber ? 'yes' : 'NO'}`);
+    return check;
+  });
+  return {found: true, count: items.length, format: format, checks: checks};
 }
 
 function parseOliveBody(body) {
@@ -1544,20 +1828,25 @@ function parseJcbBody(body) {
 // insert the same message twice. Returns the number of rows added.
 function appendImportedRows(sheet, rows, source, label) {
   if (!sheet || rows.length === 0) return 0;
-  return runWithScriptLock(() => {
-    const existingIds = getExistingMessageIds(sheet);
-    const newRows = rows
-      .filter(row => !existingIds.has(row[4]))
-      .map(row => row.slice(0, ROW_ID_COLUMN - 1).concat([newRowId()]));
-    if (newRows.length === 0) return 0;
-    ensureRowIdColumn(sheet);
-    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
-    clearCache(source);
-    return newRows.length;
-  }, () => {
+  return runWithScriptLock(() => appendImportedRowsLocked(sheet, rows, source), () => {
     console.warn(`${label} import skipped: lock busy (next trigger retries)`);
     return 0;
   });
+}
+
+// Must be called while holding the script lock: skips rows whose MessageId is
+// already in the sheet (re-read here), assigns RowIds, clears the cache.
+function appendImportedRowsLocked(sheet, rows, source) {
+  if (!sheet || rows.length === 0) return 0;
+  const existingIds = getExistingMessageIds(sheet);
+  const newRows = rows
+    .filter(row => !existingIds.has(row[4]))
+    .map(row => row.slice(0, ROW_ID_COLUMN - 1).concat([newRowId()]));
+  if (newRows.length === 0) return 0;
+  ensureRowIdColumn(sheet);
+  sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+  clearCache(source);
+  return newRows.length;
 }
 
 function determineCategory(merchant, categoryMap) {
