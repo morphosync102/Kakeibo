@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif; margin: 0; padding: 16px; background: #fafafa; color: #222; font-size: 16px; line-height: 1.5; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 17px; margin: 24px 0 8px; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  dt { color: #555; }
+  dd { margin: 0; font-weight: 600; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  .hint { color: #666; font-size: 14px; margin: 2px 0 0; }
+  input[type=text], input[type=password] { width: 100%; box-sizing: border-box; font-size: 16px; padding: 10px; border: 1px solid #bbb; border-radius: 8px; }
+  .check { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-top: 12px; }
+  .check input { width: 22px; height: 22px; }
+  button { display: block; width: 100%; font-size: 17px; padding: 14px; margin: 10px 0; border: 0; border-radius: 10px; background: #2b6cb0; color: #fff; }
+  button.secondary { background: #4a5568; }
+  button.danger { background: #c53030; }
+  button:disabled { opacity: 0.5; }
+  #message { min-height: 1.5em; font-weight: 600; white-space: pre-wrap; }
+  #message.error { color: #c53030; }
+  #message.ok { color: #276749; }
+</style>
+</head>
+<body>
+<input type="hidden" id="token" value="<?= token ?>">
+<h1>家計簿取込の設定</h1>
+<p id="message" role="status"></p>
+
+<section>
+  <h2>いまの状態</h2>
+  <dl id="status"></dl>
+</section>
+
+<section>
+  <h2>設定</h2>
+  <p class="hint">空欄の項目は変更しません(入力済みの値はこの画面に表示しません)。</p>
+
+  <label for="ingestSecret">取込の鍵</label>
+  <input type="password" id="ingestSecret" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <p class="hint">管理者から届いた英数字の値。</p>
+
+  <label for="gasUrl">家計簿の URL</label>
+  <input type="text" id="gasUrl" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec">
+  <p class="hint">管理者から届いた URL。</p>
+
+  <label for="searchQuery">検索条件</label>
+  <input type="text" id="searchQuery" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="from:&lt;カード会社の送信元アドレス&gt; subject:&lt;件名に必ず入る語&gt;">
+  <p class="hint">Gmail の検索式。from: か subject: を含めてください。転送で差出人が自分のアドレスに変わる場合は、from: を転送元のアドレスにするか、subject: の語だけにします。</p>
+
+  <label for="subjectIncludes">件名の語(任意)</label>
+  <input type="text" id="subjectIncludes" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <p class="hint">入れると、件名にこの語が無いメールは送りません。</p>
+  <div class="check"><input type="checkbox" id="clearSubjectIncludes"><label for="clearSubjectIncludes">件名の語を消す</label></div>
+
+  <div class="check"><input type="checkbox" id="dryRun"><label for="dryRun">お試しモード(家計簿に書き込まない)</label></div>
+
+  <button type="button" id="save" disabled>保存して開始</button>
+  <button type="button" id="test" class="secondary">試す(直近の 1 通を解析だけする)</button>
+</section>
+
+<section>
+  <h2>そのほか</h2>
+  <button type="button" id="retryHeld" class="secondary">保留を再送</button>
+  <button type="button" id="stop" class="secondary">停止(設定は残す)</button>
+  <button type="button" id="deleteAll" class="danger">すべて削除(やめるとき)</button>
+</section>
+
+<script>
+(function () {
+  var TOKEN = document.getElementById('token').value;
+  var FIELD_LABELS = {
+    gasUrl: '家計簿の URL(https://script.google.com/macros/s/…/exec の形)',
+    ingestSecret: '取込の鍵(英数字 32〜128 文字)',
+    searchQuery: '検索条件(必須。500 文字まで。from: か subject: を含める)',
+    subjectIncludes: '件名の語(100 文字まで)'
+  };
+  var ERRORS = {
+    token: 'ページの有効期限が切れました。ページを開き直してください。',
+    busy: '取込の処理中です。少し待ってからもう一度押してください。',
+    notConfigured: '先に設定を保存してください。',
+    internal: 'うまくいきませんでした。もう一度試し、続くようなら管理者に相談してください。'
+  };
+  var CODES = {
+    ok: '家計簿は正常に応答しました',
+    none: '該当するメールが見つかりませんでした(検索条件と、Gmail に通知が届いているかを確認)',
+    gmail: 'Gmail を読めませんでした',
+    network: '家計簿に接続できませんでした',
+    server: '家計簿が一時的に応答しませんでした',
+    Unauthorized: '取込の鍵が違います(管理者に確認)',
+    Forbidden: '家計簿側の設定が済んでいません(管理者に確認)',
+    InvalidMessage: 'メールの形式が想定と違います(管理者に確認)',
+    TooLarge: 'メールが大きすぎます(管理者に確認)',
+    RateLimited: '短時間に送りすぎました(しばらく待つ)',
+    Busy: '家計簿が混み合っています(しばらく待つ)',
+    IngestError: '家計簿でエラーが起きました(管理者に確認)',
+    unexpected: '想定外の応答です(URL を確認し、管理者に相談)'
+  };
+  var RESULTS = { ok: '正常', held: '保留あり', retry: '次の回に再送', unauthorized: '鍵が違う', gmail: 'Gmail を読めない' };
+  var buttons = ['save', 'test', 'retryHeld', 'stop', 'deleteAll'].map(function (id) { return document.getElementById(id); });
+
+  function el(id) { return document.getElementById(id); }
+  function show(text, kind) {
+    var m = el('message');
+    m.textContent = text;
+    m.className = kind || '';
+  }
+  // 「保存して開始」は状態を読み込めてから使えるようにする(読み込めないまま保存して、
+  // お試しモードのチェックが実際と食い違うのを防ぐ)
+  var statusLoaded = false;
+  function setBusy(busy) {
+    buttons.forEach(function (b) { b.disabled = busy || (b.id === 'save' && !statusLoaded); });
+  }
+  function yesNo(v) { return v ? '設定済み' : '未設定'; }
+
+  function renderStatus(s) {
+    var dl = el('status');
+    while (dl.firstChild) dl.removeChild(dl.firstChild);
+    var rows = [
+      ['家計簿の URL', yesNo(s.configured.gasUrl)],
+      ['取込の鍵', yesNo(s.configured.ingestSecret)],
+      ['検索条件', yesNo(s.configured.searchQuery)],
+      ['件名の語', yesNo(s.configured.subjectIncludes)],
+      ['開始日', yesNo(s.configured.startDate)],
+      ['自動の取込', s.trigger ? '動いている(10 分ごと)' : '止まっている'],
+      ['お試しモード', s.dryRun ? 'オン(書き込まない)' : 'オフ'],
+      ['保留', String(s.heldCount) + ' 通']
+    ];
+    if (s.lastRun) {
+      rows.push(['最後の実行', new Date(s.lastRun.at).toLocaleString('ja-JP')]);
+      rows.push(['その結果', (RESULTS[s.lastRun.result] || s.lastRun.result) + '(見つかった ' + s.lastRun.matched + ' 通・送った ' + s.lastRun.sent +
+        ' 通・追加 ' + s.lastRun.added + ' 件・取込済み ' + s.lastRun.dup + ' 通・対象外 ' + s.lastRun.skipped + ' 通)']);
+    } else {
+      rows.push(['最後の実行', 'まだありません']);
+    }
+    rows.push(['版', s.version]);
+    rows.forEach(function (r) {
+      var dt = document.createElement('dt');
+      dt.textContent = r[0];
+      var dd = document.createElement('dd');
+      dd.textContent = r[1];
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+    // 初回(まだ保存していない)はお試しモードを既定でオン。以後は保存済みの状態に合わせる
+    el('dryRun').checked = s.configured.startDate ? Boolean(s.dryRun) : true;
+    statusLoaded = true;
+    el('save').disabled = false;
+  }
+
+  function call(name, args, onOk) {
+    setBusy(true);
+    var runner = google.script.run
+      .withSuccessHandler(function (r) {
+        setBusy(false);
+        if (!r || r.ok !== true) {
+          if (r && r.invalidFields) {
+            show('次の欄を確認してください: ' + r.invalidFields.map(function (f) { return FIELD_LABELS[f] || f; }).join('、'), 'error');
+          } else {
+            show(ERRORS[r && r.error] || ERRORS.internal, 'error');
+          }
+          return;
+        }
+        if (r.status) renderStatus(r.status);
+        onOk(r);
+      })
+      .withFailureHandler(function () {
+        setBusy(false);
+        show('通信に失敗しました。ページを開き直してください。', 'error');
+      });
+    runner[name].apply(runner, [TOKEN].concat(args));
+  }
+
+  function clearInputs() {
+    ['ingestSecret', 'gasUrl', 'searchQuery', 'subjectIncludes'].forEach(function (id) { el(id).value = ''; });
+    el('clearSubjectIncludes').checked = false;
+  }
+
+  el('save').addEventListener('click', function () {
+    var form = {
+      ingestSecret: el('ingestSecret').value,
+      gasUrl: el('gasUrl').value,
+      searchQuery: el('searchQuery').value,
+      subjectIncludes: el('subjectIncludes').value,
+      clearSubjectIncludes: el('clearSubjectIncludes').checked,
+      dryRun: el('dryRun').checked
+    };
+    call('relaySaveSettings', [form], function () {
+      clearInputs();
+      show('保存しました。10 分ごとに取込を確認します。', 'ok');
+    });
+  });
+  el('test').addEventListener('click', function () {
+    show('確認しています…');
+    call('relayTest', [], function (r) {
+      var res = r.result;
+      var text = '見つかったメール: ' + res.found + ' 通\n' +
+        '解析できた明細: ' + (res.parsed === null ? '—' : res.parsed + ' 件') + '\n' +
+        '家計簿の応答: ' + (CODES[res.code] || res.code);
+      show(text, res.code === 'ok' ? 'ok' : 'error');
+    });
+  });
+  el('retryHeld').addEventListener('click', function () {
+    call('relayRetryHeld', [], function () { show('保留を解除しました。次の回に送り直します。', 'ok'); });
+  });
+  el('stop').addEventListener('click', function () {
+    if (!window.confirm('自動の取込を止めますか?(設定は残ります)')) return;
+    call('relayStop', [], function () { show('止めました。再開するときは「保存して開始」を押してください。', 'ok'); });
+  });
+  el('deleteAll').addEventListener('click', function () {
+    if (!window.confirm('トリガーと設定をすべて削除しますか?(元に戻せません)')) return;
+    call('relayDeleteAll', [], function () { clearInputs(); show('すべて削除しました。', 'ok'); });
+  });
+
+  call('relayGetStatus', [], function () {});
+})();
+</script>
+</body>
+</html>

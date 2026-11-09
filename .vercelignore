@@ -7,5 +7,6 @@ node_modules
 /build
 /.next
 /.vercel
+/relay
 *.log
 .DS_Store

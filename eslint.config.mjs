@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Apps Script source: entry points are invoked by the GAS runtime
     "gas/**",
+    // Relay Apps Script deployed with clasp to the user's own Google account (not part of the web app)
+    "relay/**",
   ]),
 ]);
 
