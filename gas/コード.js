@@ -837,6 +837,10 @@ function doPost(e) {
       return responseJSON({success: true, ignored: 'lineWebhook'});
     }
 
+    // Card notices from the relay script: INGEST_SECRET only (`ingestKey`), never
+    // PROXY_SECRET, so this comes before the proxy key check (handleIngestEmail)
+    if (params && params.action === 'ingestEmail') return responseJSON(handleIngestEmail(params));
+
     // LINE calls the webhook directly (no key); every other request is authenticated
     if (!isAuthorizedRequest(params.key)) return responseJSON({error: 'Unauthorized'});
 
@@ -1525,7 +1529,7 @@ function stripVpassUsageSuffix(merchant) {
 }
 
 // Pure parser of the 2025-03+ Vpass notification text (also for text converted
-// from HTML elsewhere, e.g. the phase-2 NAS worker for Yuki). For every
+// from HTML elsewhere; every parser may be selected by ingestEmail). For every
 // "ご利用日時：YYYY/MM/DD[ HH:MM]" block: the merchant is the text up to the
 // first "<amount>円", in whatever line layout. Returns
 // [{date: 'YYYY/MM/DD', merchant, amount}] (date part only; [] if nothing).
@@ -1915,6 +1919,270 @@ function isLineWebhookPayload(params) {
     Array.isArray(params.events) &&
     typeof params.destination === 'string'
   );
+}
+
+// --- Card notices sent by the relay script (ingestEmail) ---
+// Design: docs/design/2026-11-yuki-phase2-card-import.md §5. A relay Apps
+// Script running in the user's own Google account reads the card notices in
+// that user's Gmail and posts them here one by one. The request is
+// authenticated by Script Property INGEST_SECRET only (`ingestKey`), never by
+// PROXY_SECRET: doPost dispatches it before the proxy key check, and it is
+// not a WRITE_ACTION, so the browser proxy cannot forward it. It only ever
+// appends rows to an INGEST_SOURCES kakeibo (no read, no update, no delete),
+// like the time-driven mail import (no actor check).
+// Which parser reads the notices is a setting, not code: Script Property
+// INGEST_PARSER_<SOURCE> holds a key of INGEST_PARSERS (the user's card
+// issuer is not written in this public repository). Subject, sender and body
+// are what the relay says they are; checks on them only catch set-up mistakes.
+// Logs carry counts and result codes only (no subject, body, merchant,
+// amount, id or secret). Ingest_Log keeps the processed ids so a row the user
+// deleted is never imported again.
+const INGEST_SOURCES = Object.freeze(['yuki']);
+const INGEST_PARSERS = Object.freeze({rakuten: parseEmailBody, vpass: parseVpassEmail, jcb: parseJcbBody});
+const INGEST_LOG_SHEET_NAME = 'Ingest_Log';
+const INGEST_LOG_HEADERS = Object.freeze(['id', 'source', 'receivedAt', 'processedAt', 'result', 'parsed', 'added', 'workerVersion']);
+const INGEST_ID_PATTERN = /^[0-9a-f]{64}$/;
+const INGEST_MESSAGE_ID_PREFIX = 'gm_'; // column E: gm_ + the first 32 hex digits of the id
+const INGEST_MAX_PART_CHARS = 200000; // text and html, each
+const INGEST_MAX_TOTAL_CHARS = 450000; // subject + text + html
+const INGEST_MAX_ITEMS = 20;
+const INGEST_MAX_MERCHANT_LENGTH = 100;
+const INGEST_RATE_WINDOW_MS = 10 * 60 * 1000;
+const INGEST_RATE_MAX = 60;
+const INGEST_RATE_CACHE_PREFIX = 'kakeibo_ingest_rate_';
+const INGEST_WORKER_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,40}$/;
+const INGEST_SECRET_PATTERN = /^[A-Za-z0-9]{32,128}$/;
+
+function getIngestParserPropertyKey(source) {
+  return `INGEST_PARSER_${source.toUpperCase()}`;
+}
+
+function getIngestSubjectPropertyKey(source) {
+  return `INGEST_SUBJECT_INCLUDES_${source.toUpperCase()}`;
+}
+
+// The parser function configured for the source, or null (unset / unknown)
+function getIngestParser(source) {
+  const name = PropertiesService.getScriptProperties().getProperty(getIngestParserPropertyKey(source));
+  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(INGEST_PARSERS, name)) return null;
+  return INGEST_PARSERS[name];
+}
+
+function isIngestRequestAuthorized(params) {
+  const secret = PropertiesService.getScriptProperties().getProperty('INGEST_SECRET');
+  if (!secret) return false;
+  const key = params.ingestKey;
+  if (typeof key !== 'string' || key === '') return false;
+  return constantTimeEquals(key, secret);
+}
+
+// HTML part -> text lines for the parsers: the contents of <head>, <style>,
+// <script> and comments are dropped as whole blocks (they are not shown to
+// the reader), then normalizeVpassText turns tags into line breaks/spaces.
+// Existing import paths do not use this (their behaviour is unchanged).
+function ingestHtmlToText(html) {
+  const stripped = String(html || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(head|style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
+  return normalizeVpassText(stripped);
+}
+
+// Checks every parsed item; returns rows' values or null when any is implausible.
+// A merchant starting with = + - @ is kept as text: a leading ' is added so
+// the sheet never evaluates it as a formula.
+function normalizeIngestItems(items) {
+  if (!Array.isArray(items)) return null;
+  const normalized = [];
+  for (const item of items) {
+    if (!item || typeof item !== 'object') return null;
+    const date = normalizeTransactionDate(item.date);
+    const amount = item.amount;
+    let merchant = typeof item.merchant === 'string' ? item.merchant.trim() : '';
+    if (!date) return null;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) return null;
+    if (merchant === '' || merchant.length > INGEST_MAX_MERCHANT_LENGTH) return null;
+    if (/[\u0000-\u001f\u007f]/.test(merchant)) return null;
+    if (/^[=+\-@]/.test(merchant)) merchant = `'${merchant}`;
+    normalized.push({date: date, merchant: merchant, amount: amount});
+  }
+  return normalized;
+}
+
+// text first; when it gives nothing, the HTML part converted to text.
+// Returns the normalized items, or null (parser failure / implausible values).
+function parseIngestBodies(parser, text, html) {
+  try {
+    let items = text ? parser(text) : [];
+    if ((!Array.isArray(items) || items.length === 0) && html) items = parser(ingestHtmlToText(html));
+    return normalizeIngestItems(items || []);
+  } catch (err) {
+    return null;
+  }
+}
+
+// Sliding window per source in the Script Cache. Fails closed (a cache error
+// counts as limited, the relay retries on its next run).
+function consumeIngestRate(source) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = `${INGEST_RATE_CACHE_PREFIX}${source}`;
+    const now = Date.now();
+    let list = [];
+    try {
+      list = JSON.parse(cache.get(key) || '[]');
+    } catch (err) {
+      list = [];
+    }
+    if (!Array.isArray(list)) list = [];
+    list = list.filter(t => typeof t === 'number' && t > now - INGEST_RATE_WINDOW_MS && t <= now);
+    if (list.length >= INGEST_RATE_MAX) return false;
+    list.push(now);
+    cache.put(key, JSON.stringify(list), Math.ceil(INGEST_RATE_WINDOW_MS / 1000) + 60);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalString(value) {
+  if (value === undefined || value === null) return '';
+  return typeof value === 'string' ? value : null;
+}
+
+// Validates the request after authentication. Returns {error} or the fields.
+function readIngestRequest(params) {
+  const source = params.source;
+  if (typeof source !== 'string' || INGEST_SOURCES.indexOf(source) === -1 || !isSourceId(source)) return {error: 'Forbidden'};
+  const parser = getIngestParser(source);
+  if (!parser) return {error: 'Forbidden'};
+
+  const message = params.message;
+  if (!isPlainObject(message)) return {error: 'InvalidMessage'};
+  const subject = optionalString(message.subject);
+  const text = optionalString(message.text);
+  const html = optionalString(message.html);
+  const sizes = [subject, text, html].map(v => (typeof v === 'string' ? v.length : 0));
+  if (sizes[1] > INGEST_MAX_PART_CHARS || sizes[2] > INGEST_MAX_PART_CHARS || sizes[0] + sizes[1] + sizes[2] > INGEST_MAX_TOTAL_CHARS) {
+    return {error: 'TooLarge'};
+  }
+  if (subject === null || text === null || html === null) return {error: 'InvalidMessage'};
+  if (typeof message.id !== 'string' || !INGEST_ID_PATTERN.test(message.id)) return {error: 'InvalidMessage'};
+  if (typeof message.receivedAt !== 'string' || message.receivedAt.length > 64) return {error: 'InvalidMessage'};
+  const received = Date.parse(message.receivedAt);
+  if (isNaN(received)) return {error: 'InvalidMessage'};
+  if (params.dryRun !== undefined && params.dryRun !== null && typeof params.dryRun !== 'boolean') return {error: 'InvalidMessage'};
+  const subjectWord = PropertiesService.getScriptProperties().getProperty(getIngestSubjectPropertyKey(source));
+  if (subjectWord && subject.indexOf(subjectWord) === -1) return {error: 'InvalidMessage'};
+
+  const worker = isPlainObject(params.worker) ? params.worker : {};
+  const version = typeof worker.version === 'string' && INGEST_WORKER_VERSION_PATTERN.test(worker.version) ? worker.version : '';
+  return {
+    source: source, parser: parser, id: message.id, receivedAt: new Date(received).toISOString(),
+    text: text, html: html, dryRun: params.dryRun === true, workerVersion: version
+  };
+}
+
+function findIngestLogId(sheet, id) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const ids = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  return ids.some(row => row[0] === id);
+}
+
+// Must be called while holding the script lock
+function writeIngestedMessage(request, items) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheets = getTargetSheets(request.source);
+  const dataSheet = ss.getSheetByName(sheets.data);
+  const logSheet = ss.getSheetByName(INGEST_LOG_SHEET_NAME);
+  if (!dataSheet || !logSheet) {
+    console.warn(`ingestEmail: ${!dataSheet ? 'the data sheet' : INGEST_LOG_SHEET_NAME} of ${request.source} is missing (run setupSourceSheets / setupIngestSheet).`);
+    return {error: 'Forbidden'};
+  }
+  if (findIngestLogId(logSheet, request.id)) return {success: true, duplicate: true};
+
+  let added = 0;
+  if (items.length > 0) {
+    const categoryMap = getCategoryMap(sheets.config);
+    const messageId = INGEST_MESSAGE_ID_PREFIX + request.id.slice(0, 32);
+    const now = new Date();
+    const rows = items.map(item => [
+      item.date, item.merchant, item.amount, determineCategory(item.merchant, categoryMap), messageId, now, 'Expense'
+    ]);
+    added = appendImportedRowsLocked(dataSheet, rows, request.source);
+  }
+  const result = items.length === 0 ? 'noItems' : 'added';
+  logSheet.appendRow([
+    request.id, request.source, request.receivedAt, new Date().toISOString(), result, items.length, added, request.workerVersion
+  ]);
+  if (items.length === 0) return {success: true, parsed: 0, result: 'noItems'};
+  return {success: true, parsed: items.length, added: added};
+}
+
+// Entry point from doPost (before the proxy key check). Returns the response object.
+function handleIngestEmail(params) {
+  if (!isIngestRequestAuthorized(params)) return {error: 'Unauthorized'};
+  try {
+    const request = readIngestRequest(params);
+    if (request.error) {
+      console.log(`ingestEmail: ${request.error}`);
+      return {error: request.error};
+    }
+    if (!consumeIngestRate(request.source)) {
+      console.warn('ingestEmail: RateLimited');
+      return {error: 'RateLimited'};
+    }
+    const items = parseIngestBodies(request.parser, request.text, request.html);
+    if (!items || items.length > INGEST_MAX_ITEMS) {
+      console.log(`ingestEmail: InvalidMessage (${items ? `${items.length} items` : 'parse failure'})`);
+      return {error: 'InvalidMessage'};
+    }
+    if (request.dryRun) {
+      console.log(`ingestEmail: dryRun parsed=${items.length}`);
+      return {success: true, dryRun: true, parsed: items.length};
+    }
+    const result = runWithScriptLock(() => writeIngestedMessage(request, items), () => ({error: 'Busy'}));
+    const outcome = result.error || (result.duplicate ? 'duplicate' : result.result || 'added');
+    console.log(`ingestEmail: source=${request.source} result=${outcome} parsed=${items.length} added=${result.added || 0}`);
+    return result;
+  } catch (err) {
+    console.error(`ingestEmail failed: ${err && err.name ? err.name : 'Error'}`);
+    return {error: 'IngestError'};
+  }
+}
+
+// Editor function: creates Ingest_Log when missing (idempotent) and logs,
+// without any value, what still blocks ingestEmail. Returns {created}.
+function setupIngestSheet() {
+  return runWithScriptLock(() => {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const created = ensureAuthSheet(ss, INGEST_LOG_SHEET_NAME, INGEST_LOG_HEADERS);
+    console.log(`setupIngestSheet: ${INGEST_LOG_SHEET_NAME} ${created ? 'created' : 'already present'}`);
+    const props = PropertiesService.getScriptProperties();
+    const secret = props.getProperty('INGEST_SECRET');
+    if (!secret) {
+      console.warn('INGEST_SECRET is not set: every ingestEmail request is refused (Unauthorized).');
+    } else {
+      if (!INGEST_SECRET_PATTERN.test(secret)) console.warn('INGEST_SECRET should be 32-128 random letters/digits (e.g. openssl rand -hex 32); the relay form accepts only that.');
+      ['PROXY_SECRET', 'AUTH_PROXY_SECRET'].forEach(name => {
+        const other = props.getProperty(name);
+        if (other && constantTimeEquals(secret, other)) console.warn(`INGEST_SECRET has the same value as ${name}: use a different random value.`);
+      });
+    }
+    INGEST_SOURCES.forEach(source => {
+      if (!getIngestParser(source)) {
+        console.warn(`${getIngestParserPropertyKey(source)} is not set to one of ${Object.keys(INGEST_PARSERS).join(' / ')}: ingestEmail for ${source} is refused (Forbidden).`);
+      }
+      if (!ss.getSheetByName(getTargetSheets(source).data)) console.warn(`The data sheet of ${source} is missing: run setupSourceSheets('${source}').`);
+    });
+    return {created: created};
+  }, () => {
+    throw new Error('setupIngestSheet: could not acquire the script lock; run it again later.');
+  }, FIXED_COST_LOCK_WAIT_MS);
 }
 
 // --- Monthly LINE Reports ---

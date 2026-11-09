@@ -187,6 +187,7 @@ Never insert columns before H: code depends on column numbers (G = Type).
   `authAddCredential`, `authGetCredential`, `authRecordCredentialUse`, `authListCredentials`,
   `authRevokeCredential`, `authBumpEpoch`, `authCreateLineLinkCode`, `authLinkLine`,
   `authGetLineLinkCandidate`, `authConfirmLineLink` (see Auth)
+- POST `ingestEmail` (relay script only; `INGEST_SECRET`, not `key`; see Email Imports)
 
 When adding or changing an action, update the caller, GAS implementation, tests, and
 `docs/SPECIFICATION.md` together.
@@ -224,19 +225,38 @@ Vpass (三井住友カード / Olive, `statement@vpass.ne.jp`) parser: `parseVpa
 (`parseVpassBody`, pure: "ご利用日時：" blocks, any line layout, `|` / tag leftovers / NBSP / full-width spaces and
 digits tolerated, several transactions per mail, date part only as `YYYY/MM/DD`, usage-type suffix such as `（買物）`
 removed so merchants match the old format) falling back to the old format (`parseOliveBody`, "◇利用日："). Keep
-`parseVpassBody` free of Apps Script services (the phase-2 NAS ingest reuses it). Editor functions, in this order:
+`parseVpassBody` free of Apps Script services (every parser may be selected by `ingestEmail`). Editor functions, in this order:
 `debugLatestVpassParse()` (logs counts and yes/no checks only) → `previewVpassReimport202503()` (dry run, no lock,
 no write) → `reimportVpassSince202503()` (= `reimportVpassSince('2025/03/01')`: page by page under the lock;
 MessageId dedup, so re-running adds nothing; a transaction whose date and amount equal a row NOT imported from a
 mail (MessageId not a Gmail hex id: `manual_…`, `fixed_…`, empty; income rows excluded) is skipped, one to one,
 merchant ignored; stops after ~4.5 min, run again to continue). Never log mail bodies, merchants or amounts.
-Every Vpass mail in the admin's Gmail goes to yahoo: never auto-forward Yuki's Vpass mails there.
+Routing is by sender only and every notice in the admin's Gmail goes to the admin's kakeibo: never forward
+another person's card notices to the admin's Gmail (they arrive through `ingestEmail` instead).
 
 JCB parser fields:
 
 - `【ご利用日時(日本時間)】` -> Date
 - `【ご利用金額】` -> Amount
 - `【ご利用先】` -> Merchant
+
+### Card notices from the relay script (`ingestEmail`)
+
+Contract: `docs/SPECIFICATION.md` §5 「カード通知の受け付け」; design `docs/design/2026-11-yuki-phase2-card-import.md` §5.
+
+- `doPost` dispatches `action: 'ingestEmail'` right after the LINE webhook check and BEFORE the `key` check
+  (`handleIngestEmail`). It is authenticated only by `ingestKey` == Script Property `INGEST_SECRET` (unset -> always
+  `Unauthorized`); `key` / `authKey` never open it and `ingestKey` never opens anything else. Never add it to
+  `WRITE_ACTIONS` (the browser proxy must not be able to forward it).
+- Sources: `INGEST_SOURCES` (`yuki` only). The parser is a setting, not code: Script Property
+  `INGEST_PARSER_<SOURCE>` names a key of `INGEST_PARSERS` (`rakuten` / `vpass` / `jcb`); unset or unknown ->
+  `Forbidden`. Never write which card issuer a user has (or their sender address / subject) in the repository.
+- Append only, under the script lock: `Ingest_Log` (`setupIngestSheet()`) is checked first so a deleted row is never
+  revived; rows get MessageId `gm_` + the first 32 hex digits of the id and a RowId; only the target source's
+  cache is cleared. `dryRun` writes nothing. Rate limit 60 per 10 min per source (Script Cache).
+- Logs: result codes and counts only (never subject, body, merchant, amount, id or secret).
+- The relay itself (`relay/`) is a separate Apps Script in the user's account, deployed with clasp by the setup guide
+  `docs/guides/card-import-setup.md`; the deploy workflow never touches it.
 
 ## LINE Messaging API
 
@@ -265,6 +285,9 @@ Script Properties required:
   GAS push, old proxies never send `authKey`)
 - `AUTHZ_ENFORCE` (optional, not secret: `1` requires an actor on every data request)
 - `APP_ORIGIN` (not secret: `https://<domain>` without a path; required by `createInvite`)
+- `INGEST_SECRET` (random letters/digits, 32-128; a different value from the proxy secrets; the user types the same
+  value into the relay's settings form; unset -> `ingestEmail` refused)
+- `INGEST_PARSER_YUKI` / `INGEST_SUBJECT_INCLUDES_YUKI` (user-specific values: never in the repository)
 
 Never store these values in the repository, project skills, tests, or documentation:
 

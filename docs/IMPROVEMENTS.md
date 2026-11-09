@@ -298,7 +298,7 @@ Vercel から NAS へ移しても GAS を経由する限り体感はほぼ変わ
   - **U6 残り**: E2E(`test/auth.browser.mjs`・`test/statistics-search.browser.mjs`)はパスワードでログインしているため、仮想認証器版への置換が必要。
     GAS の `authGetAdminUser` / bootstrap 分岐の削除は G5 で検討(Next.js からは呼ばない)。
 - 8-3. 三井住友カード(Vpass)の通知メールが 2025-03 以降「ご利用日時：」形式に変わり、`parseOliveBody`(旧「◇利用日：」形式)が
-  取り込めていない可能性。新形式パーサと過去分の再取込。Yuki のカード(同じ三井住友カード)の取込にも共通で使う。
+  取り込めていない可能性。新形式パーサと過去分の再取込。
   - **対応(コード)**: 新形式の純粋関数パーサ `parseVpassBody` と新旧両対応の `parseVpassEmail`、事前確認 `previewVpassReimport` /
     `previewVpassReimport202503`(書き込みなし)、再取込 `reimportVpassSince` / `reimportVpassSince202503`(手入力行と日付・金額が一致する明細は
     1対1でスキップ、ページごとにロック内で追記、約4.5分で中断し再実行で続きから)、形式確認 `debugLatestVpassParse`(SPECIFICATION §5「三井住友カード」)。
@@ -306,8 +306,14 @@ Vercel から NAS へ移しても GAS を経由する限り体感はほぼ変わ
     `debugLatestVpassParse()`(1件以上・日付/店名/金額 yes)→ `previewVpassReimport202503()`(取込件数と手入力一致のスキップ数を確認)→
     `reimportVpassSince202503()`(「NOT complete」なら再実行)→ 個人用の明細で数件を目視確認。
     取れない場合は実行ログ(値は出ない)を共有してもらい、パーサを調整する。利用区分が `（買物）` 等以外の表記なら `VPASS_USAGE_SUFFIXES` に追加。
-  - 注意: Yuki の Vpass 通知を管理者 Gmail へ自動転送すると yahoo に入るため転送しない。フェーズ2で転送方式を採る場合は転送元アドレス
-    (Script Property)で yuki に振り分け yahoo から除外する設計が別途必要(SPECIFICATION §5 の注意)。
+  - 注意: 管理者以外の人のカード通知を管理者 Gmail へ転送すると管理者の家計簿に入るため転送しない(SPECIFICATION §5 の注意)。
+- 8-4. フェーズ2: 利用者(yuki)のカード通知の自動取込(設計書 `docs/design/2026-11-yuki-phase2-card-import.md`)。
+  - **対応(コード)**: 家計簿 GAS の `ingestEmail`(`INGEST_SECRET` のみで認証、yuki のみ、パーサは Script Property で選択、`Ingest_Log` で削除済みの明細を復活させない、
+    レート制限・大きさの上限・dryRun)とエディタ関数 `setupIngestSheet`(SPECIFICATION §5「カード通知の受け付け」)。
+    中継スクリプト `relay/`(利用者の Google アカウントで動く。`gmail.readonly`、設定フォーム)と手順書 `docs/guides/card-import-setup.md`(SPECIFICATION §5「中継スクリプト」)。
+  - **残り(ユーザー作業)**: GAS の push(承認後)→ `setupIngestSheet()` → `INGEST_PARSER_YUKI`・`INGEST_SECRET` の設定 → 管理者のリハーサル(設計書 §8.3 の 2)→
+    レビュー済みタグ(例 `relay-v1`)→ 利用者の導入(手順書)。初回設定時の要確認事項は設計書 §10.3。
+  - 後続課題: 取込直後の `expenses` タグ無効化、設定フォームからの「処理済みを消して再送」、yuki の手入力行との照合(設計書 §10.4)。
 
 ## 対応済み(参考)
 

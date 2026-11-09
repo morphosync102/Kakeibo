@@ -406,6 +406,10 @@ GASエディタの`setupAuthSheets()`が作成します(§4「認証API」の運
 
 日時はISO 8601文字列で書き込みます(シートが日時型に変換しても読めます)。
 
+### 取込記録シート(Ingest_Log)
+
+`ingestEmail`の処理済み記録。GASエディタの`setupIngestSheet()`が作成します。列と運用は§5「カード通知の受け付け」。
+
 ## 4. API契約
 
 ブラウザは直接GASへアクセスせず、Next.jsの`/api/expenses`を経由します。
@@ -634,6 +638,9 @@ APIルートの`maxDuration`は60秒です(クライアントの書き込みタ�
 | `addFixedCost` | 対象sourceへ固定費1件追加 | type, name, amount, day, category |
 | `deleteFixedCost` | 対象sourceの固定費1件削除。type/name/amount/dayを渡すと照合削除(idの行が一致すればその行、しなければ全行から最初の一致行、なければ`Fixed cost not found`)。idのみなら旧来の行番号指定 | [id], [type, name, amount, day, category] |
 
+上の表がプロキシ経由で呼べる`WRITE_ACTIONS`のすべてです。GASには別に、中継スクリプト専用の`ingestEmail`(`INGEST_SECRET`で認証、
+プロキシ非経由、`PROXY_SECRET`の照合より前に分岐)があります(§5「カード通知の受け付け」)。
+
 GASはJSONで`{ success: true, ... }`または`{ error: "..." }`を返します。
 全書き込みactionはScript Lock内で行を読み直して照合してから書き込みます。20秒以内に
 ロックを取得できない場合は何も変更せず`{ "error": "Busy" }`を返します(クライアントは失敗として扱う)。
@@ -698,7 +705,7 @@ UIは単一明細の全書き込みで`rowId`を既存フィールドと一緒�
     新旧で同じ店名にそろえるためです(`updateCategory`は店名の完全一致で書き換える。Configのキーワードは部分一致なのでどちらでも分類される)。
     それ以外の括弧(例:`（新宿店）`)は店名の一部として残します。
   - 金額0円・月日が不正・店名が空/100文字超の明細は取り込みません。
-  - 純粋関数(Apps Scriptのサービスを使わない)で、フェーズ2でNASがIMAPで読んだYukiの本文にも同じ関数を使う前提です。
+  - 純粋関数(Apps Scriptのサービスを使わない)です(`ingestEmail`のパーサ対応表からも呼べるように保つ。下の「カード通知の受け付け」)。
 - 旧形式(`parseOliveBody`、変更なし): 「◇利用日：」「◇利用先：」「◇利用金額：」。
 - エディタ関数:
   - `previewVpassReimport('YYYY/MM/DD')`(引数なし`previewVpassReimport202503()`): 下の再取込と同じ判定を**書き込まずに**行い、件数だけをログに出します
@@ -717,11 +724,110 @@ UIは単一明細の全書き込みで`rowId`を既存フィールドと一緒�
     明細ごとの「日付あり/店名あり/金額が数値」だけをログに出します(値は出さない)。デプロイ後の形式確認用。
 - 新形式対応後の手順(GASデプロイ後、エディタで): `debugLatestVpassParse()`(1件以上・すべてyes)→ `previewVpassReimport202503()`
   (件数、とくに手入力一致のスキップ数が想定どおりか)→ `reimportVpassSince202503()`(「NOT complete」なら同じ関数を再実行)→ 個人用の明細を目視確認。
-- **注意(転送)**: 振り分けは送信元(`statement@vpass.ne.jp`)だけで決まり、管理者のGmailに届いたVpass通知はすべてyahoo(個人用)に入ります。
-  YukiのVpass通知を管理者のGmailへ自動転送すると、Yukiの明細が管理者の個人用に混ざるため、**転送しないでください**。
-  - フェーズ2の代替案として「Yukiのメールを管理者のGmailへ転送し、GASがYuki用に取り込む」案が検討中(未決定)です。採用する場合は、
-    転送元アドレス(Script Propertyに置き、実アドレスはリポジトリに書かない)で転送メールを判定して`yuki`へ振り分け、
-    yahooの検索・取込からは除外する設計が必要です(現行コードは未対応。採用が決まるまで実装しない)。
+- **注意(転送)**: 時間トリガーの取込の振り分けは送信元だけで決まり、管理者のGmailに届いた通知は上の表の保存先に入ります。
+  管理者以外の人のカード通知を管理者のGmailへ転送すると、その明細が管理者の家計簿に混ざるため、**転送しないでください**。
+  他の利用者の通知は、利用者自身のアカウントで動く中継スクリプトから`ingestEmail`で受け付けます(次節)。
+
+### カード通知の受け付け(`ingestEmail`)
+
+設計書`docs/design/2026-11-yuki-phase2-card-import.md` §5。利用者(source `yuki`)の Google アカウントで動く中継スクリプトが、
+利用者の Gmail のカード利用通知を1通ずつ POST します。時間トリガーの取込(`runEmailExtraction`)は変えません。
+
+- 入口: `doPost`でLINE webhookの判定の直後、`PROXY_SECRET`(`key`)の照合より前に`action === 'ingestEmail'`を分岐します。
+  認証は本文の`ingestKey`とScript Property`INGEST_SECRET`の定数時間比較だけです(未設定なら常に`Unauthorized`。`key`・`authKey`では呼べず、
+  `ingestKey`で他のactionは呼べない)。`WRITE_ACTIONS`には含めないため、`/api/expenses`(ブラウザ)からは呼べません。
+- 受け付けるsourceはコード定数`INGEST_SOURCES`(`yuki`のみ)。`main`・`yahoo`・その他は`Forbidden`。
+  `yuki`は`requiresActor`ですが、`ingestEmail`は時間トリガーと同じ機械の経路として actor 照合を通さず、追加だけを行います(読み取り・更新・削除はしない)。
+- パーサはScript Property`INGEST_PARSER_<SOURCE>`で選びます。未設定・不明は`Forbidden`。どれを使うか(利用者のカード会社)はリポジトリに書きません。
+  値はコード定数`INGEST_PARSERS`のキー(対応する既存の関数):
+  `rakuten`(`parseEmailBody`)・`vpass`(`parseVpassEmail`)・`jcb`(`parseJcbBody`)。
+- 任意のScript Property`INGEST_SUBJECT_INCLUDES_<SOURCE>`があれば、件名にその語を含まない通知は`InvalidMessage`。From は検査も記録もしません。
+  件名・本文は中継スクリプトの申告値で、設定ミスの検出のためだけに使います(`INGEST_SECRET`が漏れた場合の被害は yuki への明細の追加に限られる)。
+
+リクエスト(POST本文):
+
+```json
+{
+  "action": "ingestEmail",
+  "ingestKey": "<INGEST_SECRET>",
+  "source": "yuki",
+  "dryRun": false,
+  "message": { "id": "<64桁の16進(SHA-256)>", "receivedAt": "<ISO 8601>", "subject": "<件名>", "text": "<text/plain>", "html": "<text/html>" },
+  "worker": { "name": "card-notice-relay", "version": "<版>" }
+}
+```
+
+処理(この順):
+
+1. `ingestKey`の照合(`Unauthorized`)→ source(`Forbidden`)→ パーサ設定(`Forbidden`)。
+2. 大きさ: `text`・`html`は各200,000文字、件名+`text`+`html`で450,000文字まで(超えたら`TooLarge`)。
+3. 形式: `message`がオブジェクト、`id`が64桁の小文字16進、`receivedAt`が日時として読める64文字以内の文字列、`subject`・`text`・`html`が文字列(省略は空)、
+   `dryRun`が真偽値(省略可)、件名の語の条件。違えば`InvalidMessage`。
+4. レート制限: sourceごとにScript Cacheで10分あたり60回まで(`dryRun`を含む)。超過・キャッシュの失敗は`RateLimited`。
+5. 解析: `text`を設定のパーサで読み、0件なら`html`を前処理して読みます。前処理は`<head>`・`<style>`・`<script>`の中身とコメントをブロックごと除き、
+   `normalizeVpassText`でタグを改行・空白にします(既存の取込の挙動は変えない)。
+   1通で20明細を超える、日付が不正、金額が正の数でない、店名が空・100文字超・制御文字を含む、パーサが例外 → `InvalidMessage`。
+   店名が`= + - @`で始まる場合は、数式として評価されないよう先頭に`'`を付けて取り込みます(通知全体は拒否しない)。
+6. `dryRun: true`なら`{ success: true, dryRun: true, parsed: n }`(ロックも書き込みもしない)。
+7. Script Lock内で: `Yuki_Data`か`Ingest_Log`が無ければ`Forbidden`(設定前)。`Ingest_Log`に同じ`id`があれば`{ success: true, duplicate: true }`
+   (明細を消した後に同じ通知が届いても復活しない)。無ければ`appendImportedRowsLocked`で追加し(E列の重複除外・RowId採番・`clearCache('yuki')`)、
+   `Ingest_Log`に1行記録します。0件なら明細は足さず`noItems`として記録します。ロック不可は`Busy`。
+
+- 明細の行: A日付(`YYYY/MM/DD`)・B店名・C金額・D分類(`Yuki_Config`、空は`未分類`)・E MessageId `gm_<idの先頭32桁>`・F取込時刻・G `Expense`・H RowId。
+  同じ通知の複数明細は同じMessageIdです(単一明細の更新・削除の厳密照合は変えない)。`gm_`で始まるため`isMailMessageId`(Gmailの16進ID)・`manual_`・`fixed_`と区別できます。
+- 応答: `{ success: true, parsed, added }` / `{ success: true, duplicate: true }` / `{ success: true, parsed: 0, result: 'noItems' }` /
+  `{ success: true, dryRun: true, parsed }` / `{ error: 'Unauthorized' | 'Forbidden' | 'InvalidMessage' | 'TooLarge' | 'RateLimited' | 'Busy' | 'IngestError' }`
+  (`IngestError`は想定外の例外。詳細は返さない)。
+- Next.jsの`expenses`タグは無効化されません(既存のメール取込と同じ。画面への反映は最大5分遅れ)。
+- ログは結果コードと件数だけです(件名・本文・店名・金額・id・シークレットは出さない)。
+
+#### `Ingest_Log`シート
+
+列: `id`(64桁)・`source`・`receivedAt`(ISO)・`processedAt`(ISO)・`result`(`added`/`noItems`)・`parsed`・`added`・`workerVersion`
+(英数字と`._-`の40文字以内のときだけ。それ以外は空)。件名・差出人・本文・店名・金額は書きません。
+形式変更などで取り直すときは、パーサを直した後に該当行を消します(中継スクリプト側の再送は後続課題)。
+
+#### 設定(GASエディタ)
+
+1. `setupIngestSheet()`: `Ingest_Log`を作ります(冪等)。`INGEST_SECRET`未設定・形式(英数字32〜128文字)・`PROXY_SECRET`/`AUTH_PROXY_SECRET`との同値、
+   `INGEST_PARSER_YUKI`の未設定・不明、`Yuki_Data`の欠如を値を出さずに警告します。
+2. Script Property`INGEST_PARSER_YUKI`(と任意で`INGEST_SUBJECT_INCLUDES_YUKI`)を設定。
+3. `INGEST_SECRET`に英数字の暗号学的乱数(例: `openssl rand -hex 32`)を設定。削除すると以後すべて`Unauthorized`(即停止、再デプロイ不要)。
+
+### 中継スクリプト(`relay/`)
+
+設計書`docs/design/2026-11-yuki-phase2-card-import.md` §4、導入手順は`docs/guides/card-import-setup.md`。家計簿のGAS・Vercelとは別物で、
+利用者の Google アカウントのApps Scriptプロジェクト「家計簿取込」に clasp(`@google/clasp@3.4.1`、`npx`で実行)で置きます
+(`.github/workflows/deploy.yml`は`gas/`だけを扱い、`relay/`は配置しない。`eslint`と`.vercelignore`の対象外)。
+
+| ファイル | 内容 |
+| --- | --- |
+| `relay/card-notice-relay.gs` | 取込本体(`relayRun`)と設定フォームのサーバー関数 |
+| `relay/settings.html` | 設定フォーム(HtmlServiceテンプレート) |
+| `relay/appsscript.json` | スコープ(`gmail.readonly`・`script.external_request`・`script.scriptapp`の3つに固定)、Gmail拡張サービス v1、Webアプリ(`USER_DEPLOYING`・`MYSELF`) |
+
+- 権限: Gmailは拡張サービスの`Users.Messages.list`・`get`・`Attachments.get`だけ(`GmailApp`等の広い権限・書き込み・送信・ラベルは使わない。テストで静的に検査)。
+  外への通信は家計簿のWeb AppのURL(`^https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec$`)へのPOSTだけ。
+- 取込(`relayRun`、10分ごとの時間主導トリガー): Script Lock(`tryLock(0)`)→ 設定の検証(欠け・形式違いは固定文言の例外)→
+  `(<SEARCH_QUERY>) newer_than:<LOOKBACK_DAYS>d -in:trash`を`includeSpamTrash: true`・50件で検索 → 処理済み・保留を除き古い順に →
+  `START_DATE`(日本時間の0時)より前と`SUBJECT_INCLUDES`を含まない件名は処理済みにして送らない → 1回20通・約4分まで送る。
+  - 本文: multipartの入れ子と`message/rfc822`の中の`text/plain`・`text/html`を集める(添付ファイルの text は読まない)。`attachmentId`だけのパートは`Attachments.get`。
+    charsetを正規化(Shift_JIS系 → `Windows-31J`、ISO-2022-JP系 → `ISO-2022-JP`、EUC-JP系 → `EUC-JP`、その他・指定なし → `UTF-8`)して文字列にし、失敗したらUTF-8で読み直す。
+  - `id`: `Message-ID`(山括弧と空白を除く)があれば`SHA-256("mid:"+値)`、無ければ`SHA-256("gmail:"+GmailのID)`。
+  - 応答: 追加・重複・`noItems` → 処理済み。`dryRun` → 記録しない。`Busy`・`RateLimited`・HTTP 5xx・通信例外 → 記録せず回を打ち切り(次の回に再送)。
+    `Unauthorized` → 回を打ち切り固定文言の例外。それ以外(`Forbidden`・`InvalidMessage`・`TooLarge`・`IngestError`・JSONでない等)→ そのメールを保留にして次へ。
+    保留が1件以上あれば回の終わりに固定文言の例外(トリガーの失敗通知が利用者に届き続ける)。
+  - Gmailの例外: 1通の`get`・`Attachments.get`・本文の組み立てに失敗したらそのメールを保留にして次へ進みます。続けて3通失敗した場合と検索(`list`)の失敗は
+    Gmail全体の問題(許可・割当など)とみなし、その3通は保留にせず回を止めて固定文言の例外を投げます(次の回に読み直す)。
+  - 処理済み・保留はScript Property`processed`/`held`(GmailのID → 記録時刻)で、`LOOKBACK_DAYS + 7`日で消す。ログと`last_run`は件数・時刻・結果コードだけ。
+- Script Properties: `KAKEIBO_GAS_URL`・`INGEST_SECRET`(英数字32〜128)・`SEARCH_QUERY`(必須、500文字以内、`from:`か`subject:`を含む)・
+  `START_DATE`(初回保存の日)・`SUBJECT_INCLUDES`(任意、100文字以内)・`LOOKBACK_DAYS`(1〜30、既定7)・`DRY_RUN`(`1`でお試し)・`processed`・`held`・`last_run`。
+  具体値はリポジトリに書かず、利用者が設定フォームで入れます。
+- 設定フォーム(`doGet`、本人だけが開けるWebアプリ): 乱数トークンを`CacheService.getUserCache()`に10分置いてページに埋め込み、サーバー関数
+  (`relayGetStatus`・`relaySaveSettings`・`relayTest`・`relayRetryHeld`・`relayStop`・`relayDeleteAll`。`google.script.run`から呼ぶ)はトークンの一致を確認してから動きます。
+  POSTの入口(`doPost`)は作らず、`setXFrameOptionsMode`も変えません。ページに出すのは状態(設定済みかどうか・トリガー・お試しモード・最後の実行の件数と時刻・保留の件数)だけで、
+  値は返しません。「保存して開始」は状態を読み込めるまで押せません(お試しモードのチェックは状態に合わせ、まだ保存していない初回だけ既定でオン)。空欄の項目は既存の値を保ち、保存のたびに`relayRun`のトリガーを1つに作り直します。「試す」は最新の該当メール1通を`dryRun: true`で送り、件数と応答コードだけを返します。
+  内部の関数は末尾`_`(ページから呼べない)。テンプレートの出力はエスケープされる`<?= ?>`だけで、表示は`textContent`で行います。
 
 ### 固定費
 
@@ -814,6 +920,11 @@ Next.jsのGETは`unstable_cache`の中でGAS応答を検証し、配列以外な
 - `AUTH_PROXY_SECRET`: 認証系アクションとactor付き要求の`authKey`を照合する共有シークレット。`PROXY_SECRET`とは別の値にし、
   Vercelの`GAS_AUTH_PROXY_SECRET`と同じ値にする。未設定の間は認証系アクションとactor付き要求がすべて`Unauthorized`
 - `PROXY_SECRET`: プロキシ認証の共有シークレット(Vercelの`GAS_PROXY_SECRET`と同じ値。未設定時は認証なし=移行期間)
+- `INGEST_SECRET`: `ingestEmail`の`ingestKey`を照合する取込専用シークレット(英数字32〜128文字の乱数。`PROXY_SECRET`・`AUTH_PROXY_SECRET`とは別の値)。
+  同じ値を利用者が中継スクリプトの設定フォームに入れる。未設定の間は`ingestEmail`がすべて`Unauthorized`(§5「カード通知の受け付け」)
+- `INGEST_PARSER_YUKI`: yuki の通知を読むパーサ名。未設定・不明は`Forbidden`。秘密値ではないが利用者の具体なのでリポジトリに書かない。
+  値は`INGEST_PARSERS`のキー(§5「カード通知の受け付け」)
+- `INGEST_SUBJECT_INCLUDES_YUKI`(任意): yuki の通知の件名に必ず含まれる語。リポジトリに書かない
 
 実値はリポジトリ、テスト、ドキュメントへ保存しません。
 
