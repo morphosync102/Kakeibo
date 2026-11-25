@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createSession, isSessionSecretConfigured, SESSION_COOKIE, sessionCookieOptions } from '@/lib/session';
 import { postLoginPath } from '@/lib/access';
@@ -9,10 +9,11 @@ import { verifyPasskeyAssertion } from '@/lib/passkey-assertion';
 import { ACTIVE_COOKIE, activeCookieOptions, createActiveToken } from '@/lib/active-session';
 
 // Passkey login, step 2 (design §3.6): purpose=login challenge cookie
-// (deleted by every answer) -> GAS authGetCredential -> signature, origin,
-// rpID, user verification, counter and userHandle == owner ->
-// authRecordCredentialUse (one-time challenge) -> passkey session (amr=pk)
+// (deleted by every answer) -> GAS authGetCredential (also spends the
+// one-time challenge) -> signature, origin, rpID, user verification, counter
+// and userHandle == owner -> passkey session (amr=pk)
 // and the app lock's active cookie (§3.12: this login also unlocks).
+// authRecordCredentialUse (lastUsedAt, counter) runs after the answer.
 // The answer is { success, userId, redirectTo } (returnTo validated by
 // postLoginPath; the client uses userId only for its cache housekeeping).
 
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
     const claims = await readChallengeToken(challengeCookie, secret, { purposes: ['login'], binding: LOGIN_BINDING });
     if (!claims) return respond({ error: 'ChallengeInvalid' }, 400);
 
-    const result = await verifyPasskeyAssertion({ config, env, fetchImpl: fetch, response: credentialResponse, challenge: claims.challenge, log: console });
+    const result = await verifyPasskeyAssertion({ config, env, fetchImpl: fetch, response: credentialResponse, challenge: claims.challenge, log: console, defer: after });
     if (!result.ok) return respond({ error: result.failure.error }, result.failure.status);
 
     const response = respond({ success: true, userId: result.user.userId, redirectTo: postLoginPath(body?.returnTo, result.user) });

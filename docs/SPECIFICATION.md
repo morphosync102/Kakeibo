@@ -151,16 +151,17 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
 
   移行期間の`bootstrap`(パスワード再入力)は廃止し、発行も受理もしません(旧Cookieは`ChallengeInvalid`)。
 
-- 1回限り: 検証に成功したチャレンジのSHA-256(`challengeHash`、UTF-8のbase64url文字列のSHA-256・小文字16進)をGASが5分記録し、
-  2回目は`ChallengeReused`(→ 400 `ChallengeInvalid`)。
+- 1回限り: チャレンジのSHA-256(`challengeHash`、UTF-8のbase64url文字列のSHA-256・小文字16進)をGASが5分記録し、
+  2回目は`ChallengeReused`(→ 400 `ChallengeInvalid`)。ログイン・再認証では公開鍵の取得(`authGetCredential`)と同じ往復で記録します
+  (署名検証の前に記録するので、検証に失敗したチャレンジも使用済みになります。画面は失敗のたびにチャレンジを取り直します)。
 - API(すべてPOST、応答は`Cache-Control: no-store`。エラーは固定の語のみで、GAS・ライブラリの詳細、チャレンジ、トークンを含めません):
 
   | API | 公開 | 処理 | 成功時 |
   | --- | --- | --- | --- |
   | `/api/auth/register/options` `{ token }` | 公開 | 招待トークンのSHA-256だけをGAS`authPeekInvite`へ(トークン自体は送らない)。`excludeCredentials`=その利用者の既存パスキー | `{ options, displayName }` + register Cookie |
   | `/api/auth/register/verify` `{ token, response }` | 公開 | Cookie(同じ招待)→ 登録検証(challenge・origin・rpID・UV)→ `authConsumeInviteAndAddCredential`(招待消費+追加を原子的に) | `{ success, userId, redirectTo: ホーム }` + `amr=pk`のセッション + `kakeibo_active` |
-  | `/api/auth/login/options` | 公開 | GAS往復なし。`allowCredentials`なし | `{ options }` + login Cookie |
-  | `/api/auth/login/verify` `{ response, returnTo? }` | 公開 | Cookie → userHandle必須 → `authGetCredential` → userHandle・パスキーの所有者・GASの利用者が一致 → 署名・UV・カウンタ検証 → `authRecordCredentialUse` | `{ success, userId, redirectTo }`(returnToは`postLoginPath`で検証)+ `amr=pk`のセッション + `kakeibo_active`(アプリロックの解除) |
+  | `/api/auth/login/options` | 公開 | GAS往復なし。`allowCredentials`なし。応答後(`after()`)にGASの起動待ちを先に済ませるため`?action=version`を1回送る(インスタンスごとに60秒に1回まで。失敗は無視) | `{ options }` + login Cookie |
+  | `/api/auth/login/verify` `{ response, returnTo? }` | 公開 | Cookie → userHandle必須 → `authGetCredential`(`challengeHash`付き。チャレンジの1回性をここで確認)→ userHandle・パスキーの所有者・GASの利用者が一致 → 署名・UV・カウンタ検証 → 応答後(`after()`)に`authRecordCredentialUse`(challengeHashなし。`challengeBusy`なら応答後にchallengeHash付き。どちらの印も無い旧GASのときだけ、従来どおり応答前にchallengeHash付きで呼ぶ) | `{ success, userId, redirectTo }`(returnToは`postLoginPath`で検証)+ `amr=pk`のセッション + `kakeibo_active`(アプリロックの解除) |
   | `/api/auth/passkeys/add/options` | 要セッション | `authListCredentials`(actor)。1件以上: 本人のパスキーだけを`allowCredentials`にした再認証 | `{ mode: 'reauth', options }` + reauth Cookie。0件: 403 `NotAllowed`(復旧招待で登録し直す) |
   | `/api/auth/passkeys/add/reauth` `{ response }` | 要セッション | reauth Cookie → login/verifyと同じ検証(userHandleとパスキーの所有者がセッションの利用者)→ epochがセッションと一致 → `authListCredentials`(excludeCredentials) | 登録用の**新しい**`{ options }` + add Cookie |
   | `/api/auth/passkeys/add/verify` `{ response }` | 要セッション | add Cookie(セッションのuserId)→ 登録検証 → `authAddCredential`(actor。`bootstrap`は送らない。GASがepoch・既存パスキーを確認) | `{ success, credentialCount }` + セッションを`amr=pk`で発行し直す |
@@ -171,8 +172,11 @@ UIのsourceレジストリは`lib/sources.ts`(id・ラベル・画面ルート�
   401 `VerificationFailed`(認証検証の失敗・userHandle不一致・カウンタ後退・失効済みや存在しないパスキー)、401 `Unauthorized`(セッション無効、GAS`SessionRevoked`。セッションCookieを削除)、
   401 `Locked`(セッションは有効でアプリロック中。middleware が返す。Cookieは削除しない)、
   403 `NotAllowed`(パスキー0件での追加、GASの`NoExistingCredential`・`BootstrapNotAllowed`)、409 `CredentialExists`、410 `InviteInvalid`、
-  503 `Service Unavailable`(設定不備・GASの失敗)。`authRecordCredentialUse`の失敗は`ChallengeReused`・`CredentialNotFound`だけがログイン失敗で、
-  それ以外(`Busy`等)はログのみでログインを続けます。
+  503 `Service Unavailable`(設定不備・GASの失敗)。`authGetCredential`の`ChallengeReused`は400 `ChallengeInvalid`。
+  応答前に呼ぶ`authRecordCredentialUse`の失敗は`ChallengeReused`・`CredentialNotFound`だけがログイン失敗で、
+  それ以外(`Busy`等)はログのみでログインを続けます。応答後に呼ぶものの失敗はログのみです。
+  このため、ログインの最中に失効されたパスキーでもそのログインは通りますが、失効でepochが上がるので、そのセッションは最初のGAS呼び出しで無効になります。
+  `challengeHash`付きの`authGetCredential`は署名検証の前にロックを取るため、有効なcredentialIdを知る者が偽の署名を繰り返すとロックが短時間ふさがります(待ちは5秒まで)。
 - カウンタ: 保存値・応答値のどちらかが0より大きく、応答値が保存値以下なら拒否(複製された認証器の検出)。iCloudキーチェーン等の同期パスキーは常に0で、0同士は許可。
   GASはカウンタが増えたときだけ更新します。
 - 招待画面`/invite#<token>`: トークンはURLフラグメントから読みます。通常のブラウザーでは直ちにアドレスバー・履歴から消します(`history.replaceState`)。
@@ -527,8 +531,8 @@ GASはdoGet/doPostで`key`照合 → source検証 → actor照合の順に判定
 | `authPeekInvite` | 招待の有効性確認(消費しない) | tokenHash | `{ success, purpose, user: { userId, displayName }, credentials: [{ credentialId, transports }] }`(excludeCredentials用) | `InviteInvalid`(存在しない・使用済み・無効化済み・期限切れ・利用者が active でない) |
 | `authConsumeInviteAndAddCredential` | 招待の消費とパスキー追加(原子的) | tokenHash, challengeHash, credential | `{ success, user: { userId, displayName, sources, homeSource, epoch } }` | `InviteInvalid`、`CredentialExists`、`ChallengeReused` |
 | `authAddCredential` | 再認証済みの本人がパスキーを追加 | actor, challengeHash, credential, bootstrap? | `{ success, credentialCount }` | `SessionRevoked`、`NoExistingCredential`(パスキー0件なのに bootstrap なし)、`BootstrapNotAllowed`(bootstrap は role=admin かつ有効なパスキー0件のときだけ)、`CredentialExists`、`ChallengeReused` |
-| `authGetCredential` | ログイン検証用の公開鍵取得 | credentialId | `{ success, credential: { credentialId, userId, publicKey, counter, transports }, user: { userId, displayName, sources, homeSource, epoch } }` | `CredentialNotFound`(存在しない・失効済み・利用者が active でない) |
-| `authRecordCredentialUse` | 認証成功の記録 | credentialId, counter, challengeHash | `{ success }`(lastUsedAt更新、counterは増えたときだけ更新) | `ChallengeReused`、`CredentialNotFound` |
+| `authGetCredential` | ログイン検証用の公開鍵取得。`challengeHash`付きならロック内でチャレンジも記録 | credentialId, challengeHash?(現行のプロキシは常に送る) | `{ success, credential: { credentialId, userId, publicKey, counter, transports }, user: { userId, displayName, sources, homeSource, epoch }, challengeRecorded?, challengeBusy? }`(`challengeRecorded: true`=記録済み。ロックを5秒待っても取れないときは何も記録せず`challengeBusy: true`を返し、呼び出し側が応答後に`authRecordCredentialUse`(challengeHash付き)で記録する) | `CredentialNotFound`(存在しない・失効済み・利用者が active でない)、`ChallengeReused` |
+| `authRecordCredentialUse` | 認証成功の記録 | credentialId, counter, challengeHash?(`authGetCredential`で記録済みなら送らない。旧プロキシは常に送る) | `{ success }`(lastUsedAt更新、counterは増えたときだけ更新) | `ChallengeReused`(challengeHash付きのみ)、`CredentialNotFound` |
 | `authListCredentials` | 本人の有効なパスキー一覧(公開鍵なし) | actor | `{ success, credentials: [{ credentialId, label, deviceType, backedUp, createdAt, lastUsedAt }] }` | `SessionRevoked` |
 | `authRevokeCredential` | 本人のパスキー失効 + epoch+1 | actor, credentialId | `{ success, epoch }` | `SessionRevoked`、`CredentialNotFound`(他人のもの・失効済みを含む) |
 | `authBumpEpoch` | 本人の全端末ログアウト(epoch+1) | actor | `{ success, epoch }` | `SessionRevoked` |

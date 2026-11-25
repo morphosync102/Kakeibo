@@ -25,7 +25,7 @@
 | `app/api/auth/line-link/{code,status,confirm}/route.ts` | LINE 連携の本人操作(`authCreateLineLinkCode` / `authGetLineLinkCandidate` / `authConfirmLineLink`)。actor はセッションから、`lineOptional` の source が無ければ 403 |
 | `app/api/line/webhook/route.ts` | LINE webhook(公開)。生本文で署名検証(不正 401)→ 200 を即答 → `after()` で連携コードを `authLinkLine` へ転送(`lib/line-webhook.ts`) |
 | `app/api/auth/register/{options,verify}/route.ts` | 招待登録(公開)。トークンの SHA-256 だけを GAS へ(`authPeekInvite` / `authConsumeInviteAndAddCredential`)、`register` チャレンジCookie、成功で `amr=pk` のセッションとアプリロックの `kakeibo_active` |
-| `app/api/auth/login/{options,verify}/route.ts` | パスキーログイン(公開)。options は GAS なし、verify は `lib/passkey-assertion.ts` → `amr=pk` のセッション・`kakeibo_active`(ロック解除)と検証済み `redirectTo` |
+| `app/api/auth/login/{options,verify}/route.ts` | パスキーログイン(公開)。options は応答前に GAS なし(応答後に `warmUpGas` で GAS を起こす)、verify は `lib/passkey-assertion.ts` → `amr=pk` のセッション・`kakeibo_active`(ロック解除)と検証済み `redirectTo` |
 | `app/api/auth/passkeys/add/{options,reauth,verify}/route.ts` | パスキー追加(要セッション)。options: 本人のパスキーでの再認証用(`reauth`。0件は 403、パスワードの bootstrap は U6 で削除) / reauth: 再認証 → 登録用の新チャレンジ(`add`) / verify: `authAddCredential` |
 | `app/api/expenses/route.ts` | **GASへの唯一のデータ用プロキシ**。GET・POSTとも `readSession` を独立検証(401+Cookie削除)→ source 検証(400)→ POST は `WRITE_ACTIONS` のみ(400)→ source ∈ セッションの sources(403)→ `GAS_AUTH_PROXY_SECRET` 必須(503)。クライアント由来の `key`/`authKey`/`actor*` を除去し、`key`・`authKey`・セッションの actor を付与。GAS の `SessionRevoked`→401+Cookie削除、`Forbidden`→403、`AuthUnavailable`→503。GETは `unstable_cache`(キーはタグ+クエリのみ、5分、配列以外は502でキャッシュしない。`fresh=1` は迂回)、`maxDuration = 60`、POSTは転送＋関連タグ無効化 |
 | `app/api/auth/verify/route.ts` | 廃止したパスワードログインの跡(公開)。常に 404 `Not Found`(何も読まず、Cookie も GAS 呼び出しもなし。古いログイン画面に「終了しました」を出させるため残す) |
@@ -64,10 +64,10 @@
 | `lib/active-session.ts` | サーバー: アプリロックの `kakeibo_active` Cookie(`a1.<期限>.<userId>.<epoch>.<署名>`、用途別の導出鍵、31分スライド)の発行・検証・Cookie 属性 |
 | `components/AppLockGuard.tsx` | ルート layout に置くクライアントのロック監視。公開パス以外で、操作時刻の記録と1分ごとの `/api/auth/session` ping、可視化・bfcache 復帰・最初のタップ・30秒ごとの確認で30分超ならロック画面へ(そのタップは握りつぶす。書き込みキューが空になってから遷移) |
 | `lib/client-session.ts` | クライアント: `kakeibo_` 始まりの localStorage 消去、`rememberLoginUser`(利用者変更時の消去)、`handleSessionExpired`(401 時)、`handleAppLocked`(401 `Locked`。消去せずロック画面へ)、`handleUnauthorized`(エラー語で振り分け)、`unauthorizedError`、`logout` |
-| `lib/gas-auth.ts` | サーバー: GAS 認証系アクションの呼び出し `callGasAuth`(`key`+`authKey`、エラーは GAS のコードで返す。ログは呼び出し側で秘密を伏せて出す) |
+| `lib/gas-auth.ts` | サーバー: GAS 認証系アクションの呼び出し `callGasAuth`(`key`+`authKey`、エラーは GAS のコードで返す。ログは呼び出し側で秘密を伏せて出す)と、ログイン前の起動待ち短縮 `warmUpGas`(`?action=version`、インスタンスごとに60秒に1回) |
 | `lib/webauthn.ts` | サーバー(Node のみ): `@simplewebauthn/server` の薄いラッパー。`webauthnConfig`(`WEBAUTHN_RP_ID`/`WEBAUTHN_ORIGIN` のみ、Host から導出しない)、登録・認証オプション生成、検証(例外は握りつぶして null)、応答の形式検査、userHandle → userId、GAS の credential 形式への変換 |
 | `lib/webauthn-challenge.ts` | サーバー: チャレンジCookie `kakeibo_webauthn`(`wa1.`、用途別の導出鍵で署名、5分、purpose と binding を固定)、`sha256Hex`(challengeHash・招待トークンハッシュ) |
-| `lib/passkey-assertion.ts` | サーバー: assertion 検証の共通処理(userHandle → `authGetCredential` → 所有者一致 → 署名・カウンタ → `authRecordCredentialUse`) |
+| `lib/passkey-assertion.ts` | サーバー: assertion 検証の共通処理(userHandle → `authGetCredential`(challengeHash付き、チャレンジの1回性もここ)→ 所有者一致 → 署名・カウンタ → 応答後(`defer` = `after()`)に `authRecordCredentialUse`。`challengeBusy`(ロック5秒待ち切れ)なら応答後に challengeHash 付き、どちらの印も無い旧 GAS なら従来どおり応答前に challengeHash 付きで記録) |
 | `lib/line-webhook.ts` | サーバー: LINE 署名(HMAC-SHA256 Base64、定数時間比較)、連携コードらしきメッセージの抽出、`authLinkLine` への転送と(`LINE_CHANNEL_ACCESS_TOKEN` 設定時のみ)成功時の返信 |
 | `lib/passkey-flow.ts` | サーバー: GAS エラー → HTTP の固定エラー対応表、JSON 本文の読み取り、招待トークンの形式検査 |
 | `lib/passkey-client.ts` | クライアント: `/api/auth/*` への POST、固定文言のエラー表示、招待フラグメントの読み取り、アプリ内ブラウザー判定、チャレンジの鮮度 |

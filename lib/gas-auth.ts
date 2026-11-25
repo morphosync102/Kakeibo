@@ -57,3 +57,32 @@ export async function callGasAuth(
     if (record.success !== true) return { ok: false, error: 'BadGateway' };
     return { ok: true, data: record };
 }
+
+// Wakes the GAS Web App while the user is still at Face ID: a GAS that has
+// been idle for a while needs a few seconds to start, which the login's own
+// round trip would otherwise wait for. login/options calls it after its
+// answer (after()). GET ?action=version (read only, the build id; `key` as
+// the expenses proxy sends it). Best effort: never throws, never logs; at
+// most once per intervalMs per server instance, because login/options is
+// public. Resolves true when a request was sent.
+export const GAS_WARM_UP_INTERVAL_MS = 60_000;
+
+export function createGasWarmUp(intervalMs = GAS_WARM_UP_INTERVAL_MS) {
+    let lastSentAt: number | null = null;
+    return async function warmUpGas({ env, fetchImpl = fetch, now = Date.now() }: { env: GasAuthEnv; fetchImpl?: typeof fetch; now?: number }): Promise<boolean> {
+        if (!env.GAS_API_URL) return false;
+        if (lastSentAt !== null && now - lastSentAt < intervalMs) return false;
+        lastSentAt = now;
+        const query = new URLSearchParams({ action: 'version' });
+        if (env.GAS_PROXY_SECRET) query.set('key', env.GAS_PROXY_SECRET);
+        try {
+            const res = await fetchImpl(`${env.GAS_API_URL}?${query}`, { method: 'GET', cache: 'no-store' });
+            await res.text();
+        } catch {
+            // a warm-up that fails changes nothing: the login's own call still runs
+        }
+        return true;
+    };
+}
+
+export const warmUpGas = createGasWarmUp();

@@ -58,6 +58,12 @@ async function call(path, { body = {}, session, challenge, env = {}, gas, ua, ho
         headers: { 'content-type': 'application/json', ...(ua ? { 'user-agent': ua } : {}) },
     });
     const res = await route.POST(request);
+    // actions / bodies: the GAS calls made before the answer; deferred*: the
+    // ones after it (after(), run here as Vercel runs them)
+    const answeredCalls = route.calls.length;
+    const pendingAfter = route.afterTasks.length;
+    await route.runAfter();
+    const posts = calls => calls.filter(([, init]) => init?.body).map(([, init]) => JSON.parse(init.body));
     const cookies = parseSetCookies(res);
     return {
         status: res.status,
@@ -65,8 +71,12 @@ async function call(path, { body = {}, session, challenge, env = {}, gas, ua, ho
         cookies,
         challengeCookie: cookies.get('kakeibo_webauthn')?.value,
         sessionCookie: cookies.get('kakeibo_session')?.value,
-        actions: route.calls.map(([, init]) => JSON.parse(init.body).action),
-        bodies: route.calls.map(([, init]) => JSON.parse(init.body)),
+        actions: posts(route.calls.slice(0, answeredCalls)).map(b => b.action),
+        bodies: posts(route.calls.slice(0, answeredCalls)),
+        deferredActions: posts(route.calls.slice(answeredCalls)).map(b => b.action),
+        deferredBodies: posts(route.calls.slice(answeredCalls)),
+        gets: route.calls.filter(([, init]) => !init?.body).map(([url]) => String(url)),
+        pendingAfter,
         logs: route.logs,
         cacheControl: res.headers.get('cache-control'),
     };
@@ -206,12 +216,12 @@ async function loginOptions(gas) {
     return { opt, challenge: opt.json.options.challenge, cookie: opt.challengeCookie };
 }
 
-test('passkey login: no GAS for options, then authGetCredential -> verify -> authRecordCredentialUse -> pk session', async () => {
+test('passkey login: no GAS for options, then authGetCredential (+ challenge) -> verify -> pk session; the use record after the answer', async () => {
     const pk = createSoftPasskey({ rpID: RP_ID, userId: ADMIN.userId, counter: 5, synced: false });
     const gas = world({ credentials: [stored(pk)] });
     const { opt, challenge, cookie } = await loginOptions(gas);
     assert.equal(opt.status, 200);
-    assert.deepEqual(opt.actions, [], 'options need no GAS round trip');
+    assert.deepEqual(opt.actions, [], 'options need no GAS round trip before the answer');
     assert.equal(opt.json.options.rpId, RP_ID);
     assert.equal(opt.json.options.userVerification, 'required');
     assert.ok(!opt.json.options.allowCredentials || opt.json.options.allowCredentials.length === 0, 'discoverable: no allowCredentials');
@@ -224,15 +234,98 @@ test('passkey login: no GAS for options, then authGetCredential -> verify -> aut
     assert.ok(deleted(ver));
     assert.deepEqual(await readSession(ver.sessionCookie, ENV), { userId: ADMIN.userId, epoch: 2, sources: ['main', 'yahoo'], homeSource: 'main', amr: 'pk' });
     assert.match(ver.cookies.get('kakeibo_session').attrs, /HttpOnly/i);
-    assert.deepEqual(ver.bodies.map(b => ({ ...b, key: undefined, authKey: undefined })), [
-        { action: 'authGetCredential', credentialId: pk.id, key: undefined, authKey: undefined },
-        { action: 'authRecordCredentialUse', credentialId: pk.id, counter: 6, challengeHash: sha256(challenge), key: undefined, authKey: undefined },
-    ]);
-    assert.ok(ver.bodies.every(b => b.authKey === DUMMY_AUTH_KEY && b.key === DUMMY_KEY));
+    const strip = b => ({ ...b, key: undefined, authKey: undefined });
+    assert.deepEqual(ver.bodies.map(strip), [
+        { action: 'authGetCredential', credentialId: pk.id, challengeHash: sha256(challenge), key: undefined, authKey: undefined },
+    ], 'one GAS round trip before the answer');
+    assert.deepEqual(ver.deferredBodies.map(strip), [
+        { action: 'authRecordCredentialUse', credentialId: pk.id, counter: 6, key: undefined, authKey: undefined },
+    ], 'lastUsedAt / counter after the answer, without the (already spent) challenge');
+    assert.ok([...ver.bodies, ...ver.deferredBodies].every(b => b.authKey === DUMMY_AUTH_KEY && b.key === DUMMY_KEY));
+    assert.ok(gas.state.challenges.has(sha256(challenge)));
     assert.equal(gas.state.credentials.get(pk.id).counter, 6);
     // the login also unlocks the app lock (active cookie bound to this session's user and epoch)
     assert.ok(await isActiveTokenValid(ver.cookies.get('kakeibo_active').value, secret, { userId: ADMIN.userId, epoch: 2 }));
     assert.equal(await isActiveTokenValid(ver.cookies.get('kakeibo_active').value, secret, { userId: ADMIN.userId, epoch: 3 }), false);
+});
+
+test('login/options wakes GAS after its answer (GET ?action=version with key, never authKey), at most once a minute per instance', async () => {
+    const gas = world();
+    const route = await loadRoute('app/api/auth/login/options/route.ts', { env: ENV, upstream: gas.upstream });
+    const res = await route.POST();
+    assert.equal(res.status, 200);
+    assert.equal(route.calls.length, 0, 'nothing before the answer');
+    assert.equal(route.afterTasks.length, 1, 'the warm-up is scheduled after the answer');
+    await route.runAfter();
+    // the route's warm-up is shared by the process (earlier tests may have used
+    // this minute's request); whatever it sent is a version GET with key only
+    for (const [url, init] of route.calls) {
+        assert.equal(init?.body, undefined);
+        assert.equal(new URL(String(url)).searchParams.get('action'), 'version');
+        assert.ok(!String(url).includes(DUMMY_AUTH_KEY));
+    }
+    const { createGasWarmUp } = await import('../lib/gas-auth.ts');
+    const urls = [];
+    const fetchImpl = async url => { urls.push(String(url)); return new Response('{"build":"x"}'); };
+    const warm = createGasWarmUp(60_000);
+    const env = { GAS_API_URL: 'http://localhost/synthetic-upstream', GAS_PROXY_SECRET: DUMMY_KEY, GAS_AUTH_PROXY_SECRET: DUMMY_AUTH_KEY };
+    assert.equal(await warm({ env, fetchImpl, now: 1_000_000 }), true);
+    assert.equal(await warm({ env, fetchImpl, now: 1_030_000 }), false, 'throttled');
+    assert.equal(await warm({ env, fetchImpl, now: 1_060_000 }), true);
+    assert.equal(urls.length, 2);
+    const url = new URL(urls[0]);
+    assert.equal(url.searchParams.get('action'), 'version');
+    assert.equal(url.searchParams.get('key'), DUMMY_KEY);
+    assert.ok(!urls[0].includes(DUMMY_AUTH_KEY), 'the auth secret never travels in a URL');
+    // no URL: nothing; a transport error is swallowed
+    assert.equal(await createGasWarmUp()({ env: {}, fetchImpl }), false);
+    assert.equal(await createGasWarmUp()({ env, fetchImpl: async () => { throw new Error('down'); } }), true);
+});
+
+test('a GAS build before challengeHash: the old blocking use record with challengeHash; replay refused', async () => {
+    const pk = createSoftPasskey({ rpID: RP_ID, userId: YUKI.userId });
+    const gas = world({ credentials: [stored(pk)] });
+    gas.state.legacyGetCredential = true;
+    const { challenge, cookie } = await loginOptions(gas);
+    const response = pk.assert({ challenge, origin: ORIGIN });
+    const first = await call('login/verify', { body: { response }, challenge: cookie, gas });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.actions, ['authGetCredential', 'authRecordCredentialUse']);
+    assert.equal(first.bodies[1].challengeHash, sha256(challenge));
+    assert.deepEqual(first.deferredActions, []);
+    const replay = await call('login/verify', { body: { response }, challenge: cookie, gas });
+    assert.equal(replay.status, 400);
+    assert.equal(replay.json.error, 'ChallengeInvalid');
+    assert.equal(replay.sessionCookie, undefined);
+});
+
+test('a busy GAS lock (challengeBusy): one round trip before the answer, the challenge recorded after it; a later replay is refused', async () => {
+    const pk = createSoftPasskey({ rpID: RP_ID, userId: YUKI.userId });
+    const gas = world({ credentials: [stored(pk)] });
+    gas.state.busyLock = true;
+    const { challenge, cookie } = await loginOptions(gas);
+    const response = pk.assert({ challenge, origin: ORIGIN });
+    const first = await call('login/verify', { body: { response }, challenge: cookie, gas });
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.actions, ['authGetCredential']);
+    assert.deepEqual(first.deferredBodies.map(b => [b.action, b.challengeHash]), [['authRecordCredentialUse', sha256(challenge)]]);
+    gas.state.busyLock = false;
+    const replay = await call('login/verify', { body: { response }, challenge: cookie, gas });
+    assert.equal(replay.status, 400);
+    assert.equal(replay.json.error, 'ChallengeInvalid');
+});
+
+test('a failed deferred use record (Busy) only logs; the login already answered', async () => {
+    const pk = createSoftPasskey({ rpID: RP_ID, userId: YUKI.userId });
+    const gas = world({ credentials: [stored(pk)] });
+    gas.state.override.authRecordCredentialUse = { error: 'Busy' };
+    const { challenge, cookie } = await loginOptions(gas);
+    const res = await call('login/verify', { body: { response: pk.assert({ challenge, origin: ORIGIN }) }, challenge: cookie, gas });
+    assert.equal(res.status, 200);
+    assert.ok(res.sessionCookie);
+    assert.deepEqual(res.deferredActions, ['authRecordCredentialUse']);
+    assert.ok(res.logs.some(line => line.includes('authRecordCredentialUse failed (Busy)')));
+    assert.ok(res.logs.every(line => !line.includes(challenge)));
 });
 
 test('a used challenge is refused (ChallengeReused): replaying the same assertion and cookie gives no session', async () => {
@@ -332,6 +425,7 @@ test('login refuses missing, expired and other-purpose challenges without callin
 test('a failed use record (Busy) does not fail the login; returnTo is validated against the sources', async () => {
     const pk = createSoftPasskey({ rpID: RP_ID, userId: YUKI.userId });
     const gas = world({ credentials: [stored(pk)] });
+    gas.state.legacyGetCredential = true; // the blocking record (old GAS build)
     for (const [returnTo, expected] of [['/yahoo', '/yuki'], ['//evil.example', '/yuki'], ['/calendar', '/calendar'], ['/settings/passkeys', '/settings/passkeys']]) {
         gas.state.override.authRecordCredentialUse = { error: 'Busy' };
         const { challenge, cookie } = await loginOptions(gas);
@@ -367,7 +461,8 @@ test('adding a passkey: re-authentication with an existing passkey, then a NEW c
     assert.deepEqual(opt.bodies, [{ action: 'authListCredentials', actorUserId: YUKI.userId, actorEpoch: 0, key: DUMMY_KEY, authKey: DUMMY_AUTH_KEY }]);
 
     assert.equal(reauth.status, 200);
-    assert.deepEqual(reauth.actions, ['authGetCredential', 'authRecordCredentialUse', 'authListCredentials']);
+    assert.deepEqual(reauth.actions, ['authGetCredential', 'authListCredentials']);
+    assert.deepEqual(reauth.deferredActions, ['authRecordCredentialUse']);
     const regOptions = reauth.json.options;
     assert.notEqual(regOptions.challenge, opt.json.options.challenge, 'a new challenge');
     assert.equal(regOptions.user.id, b64u(YUKI.userId));

@@ -15,6 +15,9 @@ export function createFakeGas({ authKey, users, invites = {}, credentials = [] }
         challenges: new Set(),
         bodies: [],
         override: {}, // action -> response (one-shot failure injection)
+        gets: [], // URLs of GET requests (the warm-up)
+        legacyGetCredential: false,
+        busyLock: false,
         links: new Map(), // userId -> { codeHash, status, lineUserId }
         destinations: {}, // userId -> LINE userId (stands for the destination property)
         lineDisplayName: 'Synthetic Name',
@@ -63,17 +66,26 @@ export function createFakeGas({ authKey, users, invites = {}, credentials = [] }
             const c = state.credentials.get(b.credentialId);
             const u = c && state.users.get(c.userId);
             if (!c || c.revoked || !u || u.status !== 'active') return { error: 'CredentialNotFound' };
-            return {
+            const answer = {
                 success: true,
                 credential: { credentialId: c.credentialId, userId: c.userId, publicKey: c.publicKey, counter: c.counter, transports: c.transports },
                 user: toUser(u),
             };
+            // legacyGetCredential: a GAS build before challengeHash (ignores it);
+            // busyLock: the lock was not available (answered without recording)
+            if (b.challengeHash === undefined || state.legacyGetCredential) return answer;
+            if (state.busyLock) return { ...answer, challengeBusy: true };
+            if (state.challenges.has(b.challengeHash)) return { error: 'ChallengeReused' };
+            state.challenges.add(b.challengeHash);
+            return { ...answer, challengeRecorded: true };
         },
         authRecordCredentialUse: b => {
             const c = state.credentials.get(b.credentialId);
             if (!c || c.revoked) return { error: 'CredentialNotFound' };
-            if (state.challenges.has(b.challengeHash)) return { error: 'ChallengeReused' };
-            state.challenges.add(b.challengeHash);
+            if (b.challengeHash !== undefined) {
+                if (state.challenges.has(b.challengeHash)) return { error: 'ChallengeReused' };
+                state.challenges.add(b.challengeHash);
+            }
             c.lastUsed = true;
             if (b.counter > c.counter) c.counter = b.counter;
             return { success: true };
@@ -145,7 +157,12 @@ export function createFakeGas({ authKey, users, invites = {}, credentials = [] }
             return { success: true, decision: b.decision };
         },
     };
-    const upstream = ([, init]) => {
+    const upstream = ([url, init]) => {
+        // GET ?action=version (login/options' warm-up): the build id only
+        if (!init?.body) {
+            state.gets.push(String(url));
+            return { build: 'synthetic' };
+        }
         const body = JSON.parse(init.body);
         state.bodies.push(body);
         if (body.authKey !== authKey) return { error: 'Unauthorized' };

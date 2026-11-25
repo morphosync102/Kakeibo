@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { after, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { isSessionSecretConfigured, readSession, SESSION_COOKIE, sessionCookieOptions } from '@/lib/session';
 import { callGasAuth } from '@/lib/gas-auth';
@@ -10,7 +10,8 @@ import { verifyPasskeyAssertion } from '@/lib/passkey-assertion';
 // Add a passkey, step 2 (design §3.3): verify the re-authentication with one
 // of the user's own passkeys (purpose=reauth cookie bound to the session
 // userId; the assertion's userHandle and the passkey's owner must be the
-// session user; one-time challenge via authRecordCredentialUse). On success,
+// session user; one-time challenge via authGetCredential, the use record
+// after the answer). On success,
 // a NEW challenge for the registration in a purpose=add cookie bound to the
 // same userId (5 minutes). The reauth challenge is never reusable for it.
 
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     if (!claims) return respond({ error: 'ChallengeInvalid' }, 400);
 
     const result = await verifyPasskeyAssertion({
-        config, env, fetchImpl: fetch, response: credentialResponse, challenge: claims.challenge, expectedUserId: session.userId, log: console,
+        config, env, fetchImpl: fetch, response: credentialResponse, challenge: claims.challenge, expectedUserId: session.userId, log: console, defer: after,
     });
     if (!result.ok) return respond({ error: result.failure.error }, result.failure.status);
     // The session must still be current (GAS checks the epoch again on add)
