@@ -112,6 +112,7 @@ const MAX_CACHE_CHUNKS = 30;
 
 // Concurrency: every write takes the script lock (IMPROVEMENTS 4-5)
 const LOCK_WAIT_MS = 20000; // Web App requests: answer Busy rather than hang
+const CHALLENGE_LOCK_WAIT_MS = 5000; // authGetCredential: a login does not wait behind a long trigger
 const FIXED_COST_LOCK_WAIT_MS = 120000; // daily trigger: a skipped day is not retried
 
 // --- Helper: proxy authentication (IMPROVEMENTS 4-1) ---
@@ -230,9 +231,13 @@ function isAuthzEnforced() {
   return PropertiesService.getScriptProperties().getProperty('AUTHZ_ENFORCE') === '1';
 }
 
+// An optional request field that was not sent (query strings send '' for an empty value)
+function isAbsentParam(value) {
+  return value === undefined || value === null || value === '';
+}
+
 function hasActorFields(params) {
-  const isAbsent = value => value === undefined || value === null || value === '';
-  return !isAbsent(params.actorUserId) || !isAbsent(params.actorEpoch);
+  return !isAbsentParam(params.actorUserId) || !isAbsentParam(params.actorEpoch);
 }
 
 // Reads actorUserId / actorEpoch from a doGet query (strings) or doPost body.
@@ -2922,9 +2927,20 @@ function findActiveCredential(credentials, users, credentialId) {
   return {row: rows[0], user: user};
 }
 
-// login/verify (and passkeys/add/reauth): the stored public key for verification
+// login/verify (and passkeys/add/reauth): the stored public key for verification.
+// With challengeHash (current proxies) it also records the one-time challenge
+// under the script lock (ChallengeReused on reuse) and answers
+// challengeRecorded: true, so the proxy can record the use afterwards
+// (authRecordCredentialUse without challengeHash) instead of waiting for a
+// second round trip before the login answers. A lock still busy after
+// CHALLENGE_LOCK_WAIT_MS answers challengeBusy: true instead (nothing
+// recorded): the proxy records the challenge with authRecordCredentialUse
+// after its answer, as a busy lock never failed a login. Without
+// challengeHash (old proxies): read only, as before.
 function authGetCredential(params) {
   if (!isBase64Url(params.credentialId, MAX_CREDENTIAL_ID_LENGTH)) return {error: 'Invalid input'};
+  const withChallenge = !isAbsentParam(params.challengeHash);
+  if (withChallenge && !isSha256Hex(params.challengeHash)) return {error: 'Invalid input'};
   const users = loadAuthUsers();
   if (users.error) return users;
   const credentials = loadAuthCredentials();
@@ -2932,7 +2948,7 @@ function authGetCredential(params) {
   const found = findActiveCredential(credentials, users, params.credentialId);
   if (!found) return {error: 'CredentialNotFound'};
   const counter = Number(credentials.get(found.row, 'counter'));
-  return {
+  const answer = {
     success: true,
     credential: {
       credentialId: params.credentialId,
@@ -2943,13 +2959,25 @@ function authGetCredential(params) {
     },
     user: toSessionUser(found.user)
   };
+  if (!withChallenge) return answer;
+  return runWithScriptLock(() => {
+    if (!recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
+    answer.challengeRecorded = true;
+    return answer;
+  }, () => {
+    answer.challengeBusy = true;
+    return answer;
+  }, CHALLENGE_LOCK_WAIT_MS);
 }
 
-// After a verified authentication: one-time challenge, lastUsedAt, and the
-// counter when it increased (synced passkeys always report 0).
+// After a verified authentication: lastUsedAt, and the counter when it
+// increased (synced passkeys always report 0). With challengeHash, also the
+// one-time challenge (old proxies, or authGetCredential could not record it);
+// without it, the challenge was already recorded by authGetCredential.
 function authRecordCredentialUse(params) {
+  const withChallenge = !isAbsentParam(params.challengeHash);
   if (!isBase64Url(params.credentialId, MAX_CREDENTIAL_ID_LENGTH) ||
-      !isValidCounter(params.counter) || !isSha256Hex(params.challengeHash)) {
+      !isValidCounter(params.counter) || (withChallenge && !isSha256Hex(params.challengeHash))) {
     return {error: 'Invalid input'};
   }
   return runAuthWrite(() => {
@@ -2959,7 +2987,7 @@ function authRecordCredentialUse(params) {
     if (!credentials) return {error: 'AuthUnavailable'};
     const found = findActiveCredential(credentials, users, params.credentialId);
     if (!found) return {error: 'CredentialNotFound'};
-    if (!recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
+    if (withChallenge && !recordChallengeOnce(params.challengeHash)) return {error: 'ChallengeReused'};
     credentials.set(found.row, 'lastUsedAt', new Date().toISOString());
     const stored = Number(credentials.get(found.row, 'counter'));
     if (!isValidCounter(stored) || params.counter > stored) credentials.set(found.row, 'counter', params.counter);

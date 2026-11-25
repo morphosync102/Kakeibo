@@ -76,6 +76,7 @@ function createSheet(name, rows, events) {
 function loadGas({ sheets = {}, properties = { PROXY_SECRET: KEY, AUTH_PROXY_SECRET: AUTH_KEY, APP_ORIGIN: ORIGIN }, lockAvailable = true } = {}) {
   const events = [];
   const logs = [];
+  const lock = { available: lockAvailable }; // tests may take the lock away later
   const sheetObjects = {};
   for (const [name, rows] of Object.entries(sheets)) sheetObjects[name] = createSheet(name, rows, events);
   const store = new Map();
@@ -115,7 +116,7 @@ function loadGas({ sheets = {}, properties = { PROXY_SECRET: KEY, AUTH_PROXY_SEC
     },
     LockService: {
       getScriptLock: () => ({
-        tryLock: () => { events.push('lock:try'); if (lockAvailable) events.push('lock:acquired'); return lockAvailable; },
+        tryLock: (ms) => { lock.lastWaitMs = ms; events.push('lock:try'); if (lock.available) events.push('lock:acquired'); return lock.available; },
         releaseLock: () => events.push('lock:released'),
       }),
     },
@@ -141,7 +142,7 @@ function loadGas({ sheets = {}, properties = { PROXY_SECRET: KEY, AUTH_PROXY_SEC
   vm.createContext(sandbox);
   vm.runInContext(gasSource, sandbox);
   const snapshot = () => JSON.stringify(Object.fromEntries(Object.entries(sheetObjects).map(([k, s]) => [k, s.rows])));
-  return { gas: sandbox, events, logs, sheets: sheetObjects, store, ttls, props, clock, snapshot };
+  return { gas: sandbox, events, logs, sheets: sheetObjects, store, ttls, props, clock, snapshot, lock };
 }
 
 // Auth actions come only from the new /api/auth/* routes, which add both keys
@@ -454,6 +455,53 @@ test('authRecordCredentialUse records lastUsedAt and raises the counter only whe
   assert.equal(post(env.gas, { action: 'authRecordCredentialUse', credentialId: id, counter: 3, challengeHash: hashOf(3) }).success, true);
   assert.equal(row()[3], 7, 'never lowered');
   assert.deepEqual(post(env.gas, { action: 'authRecordCredentialUse', credentialId: id, counter: -1, challengeHash: hashOf(4) }), { error: 'Invalid input' });
+});
+
+test('authGetCredential with challengeHash records the one-time challenge under the lock (login answers after one round trip)', () => {
+  const env = ready();
+  const cred = credential('admin');
+  const row = () => env.sheets.Auth_Credentials.rows.find(r => r[1] === env.admin.userId);
+  const mark = env.events.length;
+  const got = post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId, challengeHash: hashOf('fast') });
+  assert.equal(got.success, true);
+  assert.equal(got.challengeRecorded, true);
+  assert.equal(got.credential.publicKey, cred.publicKey);
+  assert.deepEqual(env.events.slice(mark).filter(e => e.startsWith('lock:')), ['lock:try', 'lock:acquired', 'lock:released']);
+  assert.equal(row()[9], '', 'reading the key writes nothing');
+  // the same challenge is refused everywhere afterwards
+  assert.deepEqual(post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId, challengeHash: hashOf('fast') }), { error: 'ChallengeReused' });
+  assert.deepEqual(post(env.gas, { action: 'authRecordCredentialUse', credentialId: cred.credentialId, counter: 0, challengeHash: hashOf('fast') }), { error: 'ChallengeReused' });
+  // the deferred use record carries no challengeHash
+  assert.equal(post(env.gas, { action: 'authRecordCredentialUse', credentialId: cred.credentialId, counter: 4 }).success, true);
+  assert.ok(row()[9], 'lastUsedAt set');
+  assert.equal(row()[3], 4);
+  // without challengeHash (old proxies): read only, no lock, nothing recorded
+  const before = env.events.length;
+  const plainGet = post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId });
+  assert.equal(plainGet.success, true);
+  assert.equal(plainGet.challengeRecorded, undefined);
+  assert.equal(plainGet.challengeBusy, undefined);
+  assert.ok(!env.events.slice(before).includes('lock:try'));
+  assert.equal(post(env.gas, { action: 'authRecordCredentialUse', credentialId: cred.credentialId, counter: 4, challengeHash: hashOf('old') }).success, true);
+  for (const challengeHash of ['nothex', 'A'.repeat(64), 7]) {
+    assert.deepEqual(post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId, challengeHash }), { error: 'Invalid input' }, String(challengeHash));
+    assert.deepEqual(post(env.gas, { action: 'authRecordCredentialUse', credentialId: cred.credentialId, counter: 4, challengeHash }), { error: 'Invalid input' }, String(challengeHash));
+  }
+});
+
+test('authGetCredential with challengeHash: unknown keys record nothing; a busy lock answers without challengeRecorded', () => {
+  const env = ready();
+  assert.deepEqual(post(env.gas, { action: 'authGetCredential', credentialId: b64u('unknown'), challengeHash: hashOf('u') }), { error: 'CredentialNotFound' });
+  const cred = credential('admin');
+  assert.equal(post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId, challengeHash: hashOf('u') }).challengeRecorded, true, 'the failed lookup did not burn the challenge');
+  env.lock.available = false;
+  const busy = post(env.gas, { action: 'authGetCredential', credentialId: cred.credentialId, challengeHash: hashOf('busy') });
+  assert.equal(busy.success, true);
+  assert.equal(busy.challengeRecorded, undefined);
+  assert.equal(busy.challengeBusy, true, 'the proxy records the challenge with authRecordCredentialUse after its answer');
+  assert.equal(env.lock.lastWaitMs, 5000, 'a login waits at most 5 s for the lock (not the 20 s of writes)');
+  env.lock.available = true;
+  assert.equal(post(env.gas, { action: 'authRecordCredentialUse', credentialId: cred.credentialId, counter: 0, challengeHash: hashOf('busy') }).success, true, 'not recorded while busy');
 });
 
 test('a credential id starting with "-" is stored as plain text and round-trips', () => {
